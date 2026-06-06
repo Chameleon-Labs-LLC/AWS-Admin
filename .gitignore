@@ -1,0 +1,26 @@
+# Secrets — never commit. State lives in ~/.config/aws-admin/, but guard anyway.
+*.enc
+*.key
+.env*
+!.env.example
+*.pem
+secrets.json
+config.json
+config.toml
+.scan-reports/
+inbox.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv_linux/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+
+# OS / editor
+.DS_Store
+*.swp

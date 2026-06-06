@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aws-admin"
+version = "0.1.0"
+description = "Secure AWS admin CLI — manage Amplify env vars without leaking secret values into prompts"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.34",
+    "cryptography>=42.0",
+    "psycopg[binary]>=3.1,<3.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+aws-admin = "aws_admin.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aws_admin = ["queries/*.sql"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
