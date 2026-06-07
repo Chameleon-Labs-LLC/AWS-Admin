@@ -7,7 +7,7 @@ allowed-tools: Bash
 Run the DB query/file `$ARGUMENTS` (read-only; results go to a local file, only a
 redacted summary is shown):
 
-!`/mnt/d/Documents/Code/GitHub/AWS-Admin/.venv_linux/bin/aws-admin db run $ARGUMENTS`
+!`/mnt/d/Documents/Code/GitHub/AWS-Admin/bin/aws-admin db run $ARGUMENTS`
 
 Report the row count / columns / file path. Do NOT print row values. If the SQL has
 `{{NAME}}` placeholders it will open the user's editor — in that case tell the user to

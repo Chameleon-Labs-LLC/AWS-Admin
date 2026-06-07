@@ -6,7 +6,7 @@ allowed-tools: Bash
 
 Dry-run the push for `$ARGUMENTS` (this sends nothing):
 
-!`/mnt/d/Documents/Code/GitHub/AWS-Admin/.venv_linux/bin/aws-admin env push $ARGUMENTS`
+!`/mnt/d/Documents/Code/GitHub/AWS-Admin/bin/aws-admin env push $ARGUMENTS`
 
 Report the key-only diff. To actually apply, the user must explicitly confirm; only then
 run `aws-admin env push $ARGUMENTS --apply` (add `--redeploy` if they want a redeploy).
