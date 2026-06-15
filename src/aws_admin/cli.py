@@ -35,7 +35,7 @@ def _apps_epilog() -> str:
         acronyms = ", ".join(aliases) if aliases else "(no acronym)"
         lines.append(f"  {name.ljust(width)}  {acronyms}")
     lines.append("")
-    lines.append("Pass 'all' to pull, redeploy, or push to act on every app above.")
+    lines.append("Pass 'all' to pull, redeploy, push, or rotate across every app above.")
     return "\n".join(lines)
 
 
