@@ -157,3 +157,19 @@ def resolve_app(token: str) -> AppRef:
         for name, (app_id, aliases) in sorted(apps.items(), key=lambda kv: kv[0].lower())
     )
     raise UnknownAppError(f"Unknown app '{token}'. Valid apps: {choices}")
+
+
+def resolve_apps(tokens: list[str]) -> list[AppRef]:
+    """Resolve a list of app tokens to AppRefs.
+
+    If any token is 'all' (case-insensitive), returns every known app (sorted).
+    Otherwise resolves each token via resolve_app() and dedupes by canonical
+    name, preserving first-seen order. Unknown tokens raise UnknownAppError.
+    """
+    if any(t.strip().lower() == "all" for t in tokens):
+        return known_apps()
+    seen: dict[str, AppRef] = {}
+    for token in tokens:
+        ref = resolve_app(token)
+        seen.setdefault(ref.name, ref)
+    return list(seen.values())
