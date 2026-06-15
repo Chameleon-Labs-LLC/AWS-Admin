@@ -166,6 +166,39 @@ def edit_buffer(initial_text: str, _open_editor=None) -> str:
         _shred(buf)
 
 
+def _parse_single_value(text: str, key: str) -> str:
+    """Return the value on the first non-comment ``key=...`` line, else "".
+
+    Splits on the first '=' (so values may contain '='); strips a trailing CR
+    only, matching parse_buffer's value handling. Comment/blank lines are skipped.
+    """
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        k, value = line.split("=", 1)
+        if k.strip() == key:
+            return value.rstrip("\r")
+    return ""
+
+
+def capture_value(key: str, target_names: list[str], _open_editor=_default_open_editor) -> str:
+    """Capture a single new value for `key` via the RAM-backed shred-after editor.
+
+    The buffer is blank (no old value is shown). Returns the value typed after
+    'key=' , or "" if left empty. The temp buffer is shredded by edit_buffer.
+    """
+    template = (
+        f"# Enter the new value for {key} after '='. Save & exit.\n"
+        f"# Writes to local snapshots only: {', '.join(target_names)}\n"
+        f"# Empty value = abort, no changes.\n"
+        f"{key}=\n"
+    )
+    text = edit_buffer(template, _open_editor=_open_editor)
+    return _parse_single_value(text, key)
+
+
 def edit_app_buffer(app_name: str, _open_editor=_default_open_editor) -> bool:
     """Open the decrypted snapshot in $EDITOR; re-encrypt and shred on save.
 
