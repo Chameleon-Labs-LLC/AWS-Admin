@@ -181,6 +181,34 @@ You should see something like `MyShop: 26 app-level keys, 0 branch-level keys`
    start a redeploy so the app picks it up. (Amplify apps only read env vars
    at build time, which is why the redeploy matters.)
 
+### Rotating one shared secret across several apps
+
+When the same secret (e.g. `AI_STREAM_SECRET`) is shared by multiple apps, use
+`env rotate` to enter the new value **once** and apply it to every app's local
+snapshot:
+
+```
+aws-admin env pull all                          # refresh local snapshots first
+aws-admin env rotate AI_STREAM_SECRET cl hc qs  # or 'all' instead of a list
+```
+
+- `rotate` never calls AWS — it only edits your local snapshots, so pull first.
+  If any listed app has no snapshot yet, it aborts and tells you which to pull.
+- Your editor opens once (RAM-backed, shredded on close) for the new value; it
+  is written to every level (app- and branch-level) where the key already
+  exists.
+- If an app doesn't have the key, you're asked whether to add it (at app-level).
+- Each changed snapshot is backed up first, under
+  `~/.config/aws-admin/backups/`.
+- Output is key/app names only — the value is never shown.
+
+Then push as usual, one app or all:
+
+```
+aws-admin env push cl --apply --redeploy
+aws-admin env push all --apply --redeploy
+```
+
 ## Branch-level overrides
 
 Amplify lets you set env vars at two levels: app-wide, and per-branch
