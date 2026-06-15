@@ -122,7 +122,23 @@ def __getattr__(name: str):
 
 
 def known_apps() -> list[AppRef]:
-    return [AppRef(name, app_id) for name, (app_id, _) in _settings().apps.items()]
+    """Every configured app, sorted by name (case-insensitive)."""
+    return sorted(
+        (AppRef(name, app_id) for name, (app_id, _) in _settings().apps.items()),
+        key=lambda ref: ref.name.lower(),
+    )
+
+
+def app_aliases() -> list[tuple[str, tuple[str, ...]]]:
+    """(canonical name, alias tokens) per configured app, sorted by name.
+
+    Deliberately omits app IDs — help output stays to non-sensitive
+    names/acronyms only.
+    """
+    return sorted(
+        ((name, aliases) for name, (_, aliases) in _settings().apps.items()),
+        key=lambda item: item[0].lower(),
+    )
 
 
 def resolve_app(token: str) -> AppRef:
@@ -138,6 +154,6 @@ def resolve_app(token: str) -> AppRef:
             return AppRef(name, app_id)
     choices = ", ".join(
         f"{name} ({aliases[0] if aliases else app_id})"
-        for name, (app_id, aliases) in apps.items()
+        for name, (app_id, aliases) in sorted(apps.items(), key=lambda kv: kv[0].lower())
     )
     raise UnknownAppError(f"Unknown app '{token}'. Valid apps: {choices}")

@@ -1,5 +1,8 @@
 import subprocess
 import sys
+
+import pytest
+
 from aws_admin import cli
 
 
@@ -47,3 +50,53 @@ def test_main_reports_unknown_app(capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "error:" in err
+
+
+# Synthetic apps from conftest, in case-insensitive alphabetical order.
+_SORTED_APPS = ["AppAlpha", "AppBeta", "AppGamma", "ExampleOrg", "MyApp2"]
+
+
+def test_env_pull_all_runs_every_app_in_order(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(_env, "pull", lambda t: seen.append(t) or f"pulled {t}")
+    rc = cli.main(["env", "pull", "all"])
+    assert rc == 0
+    assert seen == _SORTED_APPS
+    assert "pulled AppAlpha" in capsys.readouterr().out
+
+
+def test_env_all_token_is_case_insensitive(monkeypatch):
+    seen = []
+    monkeypatch.setattr(_env, "redeploy", lambda t: seen.append(t) or "ok")
+    assert cli.main(["env", "redeploy", "ALL"]) == 0
+    assert seen == _SORTED_APPS
+
+
+def test_env_push_all_continues_past_per_app_failure(monkeypatch, capsys):
+    def push(t, apply=False, redeploy=False):
+        if t == "AppBeta":
+            raise FileNotFoundError("no snapshot")
+        return f"pushed {t}"
+    monkeypatch.setattr(_env, "push", push)
+    rc = cli.main(["env", "push", "all"])
+    assert rc == 1  # one app failed
+    cap = capsys.readouterr()
+    assert "pushed AppAlpha" in cap.out and "pushed MyApp2" in cap.out  # others still ran
+    assert "AppBeta" in cap.err  # failure surfaced, not swallowed
+
+
+def _flatten(text: str) -> str:
+    # argparse wraps help across lines; collapse whitespace to match phrases.
+    return " ".join(text.split())
+
+
+def test_pull_help_advertises_all(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["env", "pull", "-h"])
+    assert "or 'all' for every configured app" in _flatten(capsys.readouterr().out)
+
+
+def test_diff_does_not_advertise_all_on_app_arg(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["env", "diff", "-h"])
+    assert "for every configured app" not in _flatten(capsys.readouterr().out)

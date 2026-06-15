@@ -1,16 +1,33 @@
-# Copy this file to ~/.config/aws-admin/config.toml (or $AWS_ADMIN_HOME/config.toml)
-# and fill in your own values. This file ships with placeholders only.
+# aws-admin configuration — EXAMPLE FILE (placeholders only).
+#
+# Setup:
+#   mkdir -p ~/.config/aws-admin
+#   cp config.example.toml ~/.config/aws-admin/config.toml
+#   $EDITOR ~/.config/aws-admin/config.toml
+#
+# (Or put it at $AWS_ADMIN_HOME/config.toml if you set that variable.)
+# Not sure where to find a value? See docs/usage.md → "Where to find the
+# required values" — it covers both the AWS Console and the AWS CLI.
 
 # Your 12-digit AWS account ID.
+# Console: click your account name (top right) — the ID is in the dropdown.
+# CLI:     aws sts get-caller-identity --query Account --output text
 account_id = "123456789012"
 
 [database]
-# RDS PostgreSQL endpoint and database name.
+# RDS PostgreSQL endpoint and database name. Only needed for `aws-admin db` commands.
+# Console: RDS → Databases → your instance → "Connectivity & security" → Endpoint.
+# CLI:     aws rds describe-db-instances \
+#            --query 'DBInstances[].{endpoint:Endpoint.Address,dbname:DBName}' --output table
 host = "your-db.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com"
 name = "your_db"
 
-# One [apps.<Name>] table per Amplify app. <Name> is the canonical app name;
-# `aliases` are extra short tokens you can pass on the command line.
+# One [apps.<Name>] table per Amplify app. <Name> is the app's display name
+# (as shown in the Amplify console); `aliases` are short nicknames YOU invent
+# to use on the command line (e.g. `aws-admin env pull my`).
+# Console: Amplify → your app → App settings → General settings → the App ARN
+#          ends in apps/<app_id> (a "d"-prefixed ID).
+# CLI:     aws amplify list-apps --query 'apps[].{name:name,appId:appId}' --output table
 [apps.MyApp]
 app_id = "d0000000000000"
 aliases = ["my"]
