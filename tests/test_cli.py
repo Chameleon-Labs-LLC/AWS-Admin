@@ -100,3 +100,34 @@ def test_diff_does_not_advertise_all_on_app_arg(capsys):
     with pytest.raises(SystemExit):
         cli.main(["env", "diff", "-h"])
     assert "for every configured app" not in _flatten(capsys.readouterr().out)
+
+
+def test_parse_env_rotate():
+    args = cli.build_parser().parse_args(
+        ["env", "rotate", "AI_SECRET", "cl", "hc", "qs"]
+    )
+    assert args.group == "env"
+    assert args.action == "rotate"
+    assert args.name == "AI_SECRET"
+    assert args.apps == ["cl", "hc", "qs"]
+
+
+def test_rotate_dispatch_calls_command(monkeypatch, capsys):
+    seen = {}
+
+    def fake_rotate(name, apps):
+        seen["name"] = name
+        seen["apps"] = apps
+        return "ROTATED-OK"
+
+    monkeypatch.setattr(_env, "rotate", fake_rotate)
+    rc = cli.main(["env", "rotate", "AI_SECRET", "my", "aa"])
+    assert rc == 0
+    assert seen == {"name": "AI_SECRET", "apps": ["my", "aa"]}
+    assert "ROTATED-OK" in capsys.readouterr().out
+
+
+def test_rotate_help_advertises_all(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["env", "rotate", "-h"])
+    assert "for every configured app" in _flatten(capsys.readouterr().out)

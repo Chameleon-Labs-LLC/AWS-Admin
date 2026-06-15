@@ -87,6 +87,18 @@ def build_parser() -> argparse.ArgumentParser:
     push_p.add_argument("--redeploy", action="store_true",
                         help="Start a RELEASE job after a successful --apply")
 
+    rotate_p = actions.add_parser(
+        "rotate",
+        help="Rotate one shared secret across apps' local snapshots (no AWS; push after)",
+        epilog=apps_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    rotate_p.add_argument("name", help="Env-var key to rotate, e.g. AI_STREAM_SECRET")
+    rotate_p.add_argument(
+        "apps", nargs="+",
+        help=f"One or more app tokens (space-separated), or 'all'. {app_help_all}",
+    )
+
     db_p = groups.add_parser("db", help="PostgreSQL admin")
     db_actions = db_p.add_subparsers(dest="action", required=True)
     db_actions.add_parser("set-password", help="Store the DB password (hidden prompt)")
@@ -147,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
                     lambda t: env_cmd.push(t, apply=args.apply, redeploy=args.redeploy),
                     args.app,
                 )
+            elif args.action == "rotate":
+                print(env_cmd.rotate(args.name, args.apps))
         elif args.group == "db":
             if args.action == "set-password":
                 db_cmd.set_password()
