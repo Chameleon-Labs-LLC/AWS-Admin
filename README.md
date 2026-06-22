@@ -96,4 +96,28 @@ aws-admin db clean-results       # delete saved result files
 - Connections are read-only by default; writes need `--write` (a rolled-back
   preview) and then `--write --commit` to take effect.
 
+## Cost reporting
+
+A read-only spend report built from the Cost Explorer and Free Tier APIs — no
+config file required, and the account ID is redacted to its last four digits.
+
+```bash
+aws-admin cost report                  # 6-month trend, prints Markdown
+aws-admin cost report --months 12
+aws-admin cost report --out cost.md    # also write the report to a file
+```
+
+The report covers: a monthly spend trend, a by-service breakdown (last full
+month + current partial month), a current-month projection (linear run-rate),
+and — most useful near a Free Tier anniversary — an **estimate of how much the
+bill rises when 12-month free-tier benefits end**, plus a watch list of any
+active *free trials* (e.g. DevOps Guru) that bill $0 today but start charging
+when the trial ends.
+
+- Estimates use on-demand us-east-1 rates kept in a small, transparent `RATES`
+  table in `commands/cost.py`; they approximate the increase, not an invoice.
+- Needs `ce:GetCostAndUsage`, `freetier:GetFreeTierUsage`, and
+  `sts:GetCallerIdentity` on the configured AWS principal. Cost Explorer bills
+  ~$0.01 per paid request; one report makes a handful.
+
 See [docs/usage.md](docs/usage.md) for the full beginner-friendly walkthrough.

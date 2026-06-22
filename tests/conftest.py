@@ -140,3 +140,70 @@ class FakeDBConn:
 @pytest.fixture
 def fake_db():
     return FakeDBConn
+
+
+# --- Cost report fakes -----------------------------------------------------
+import datetime as _dt
+
+
+class FakeCE:
+    """Stand-in for the boto3 Cost Explorer client.
+
+    Non-grouped queries return one canned $100 month per month in [Start, End)
+    (so trend lists N rows and an intra-month MTD query returns one). Grouped
+    queries return a fixed by-service breakdown, including a $0 row that the
+    command is expected to drop.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def get_cost_and_usage(self, TimePeriod, Granularity, Metrics, GroupBy=None):
+        self.calls.append(("get_cost_and_usage", TimePeriod, bool(GroupBy)))
+        if GroupBy:
+            return {"ResultsByTime": [{"Groups": [
+                {"Keys": ["Amazon EC2"], "Metrics": {"UnblendedCost": {"Amount": "80.00"}}},
+                {"Keys": ["AWS WAF"], "Metrics": {"UnblendedCost": {"Amount": "39.00"}}},
+                {"Keys": ["Zero Svc"], "Metrics": {"UnblendedCost": {"Amount": "0"}}},
+            ]}]}
+        start = _dt.date.fromisoformat(TimePeriod["Start"])
+        end = _dt.date.fromisoformat(TimePeriod["End"])
+        si = start.year * 12 + (start.month - 1)
+        ei = end.year * 12 + (end.month - 1)
+        months = [_dt.date(i // 12, i % 12 + 1, 1).isoformat() for i in range(si, ei)]
+        if not months:  # intra-month window (MTD)
+            months = [start.replace(day=1).isoformat()]
+        return {"ResultsByTime": [
+            {"TimePeriod": {"Start": s}, "Total": {"UnblendedCost": {"Amount": "100.00"}}}
+            for s in months
+        ]}
+
+
+class FakeFreeTier:
+    def get_free_tier_usage(self, **kwargs):
+        return {"freeTierUsages": [
+            {"service": "AWS Amplify", "usageType": "BuildDuration",
+             "freeTierType": "12 Months Free", "actualUsageAmount": 831.0,
+             "forecastedUsageAmount": 1175.0, "limit": 1000.0, "unit": "minutes"},
+            {"service": "Amazon Virtual Private Cloud", "usageType": "PublicIPv4:InUseAddress",
+             "freeTierType": "12 Months Free", "actualUsageAmount": 750.0,
+             "forecastedUsageAmount": 1023.0, "limit": 750.0, "unit": "Hrs"},
+            {"service": "AWS Lambda", "usageType": "Request",
+             "freeTierType": "Always Free", "actualUsageAmount": 1436.0,
+             "forecastedUsageAmount": 2051.0, "limit": 1000000.0, "unit": "Request"},
+            {"service": "Amazon DevOps Guru", "usageType": "ResourceGroup-B-usagehours",
+             "freeTierType": "Free Trial", "actualUsageAmount": 509.0,
+             "forecastedUsageAmount": 707.0, "limit": 7200.0, "unit": "usagehours"},
+        ]}
+
+
+class FakeSts:
+    def get_caller_identity(self):
+        return {"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/x",
+                "UserId": "AIDAEXAMPLE"}
+
+
+@pytest.fixture
+def cost_clients():
+    """(ce, freetier, sts) fakes for the cost report command."""
+    return FakeCE(), FakeFreeTier(), FakeSts()

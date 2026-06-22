@@ -10,6 +10,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from . import config, vault
 from .commands import env as env_cmd
 from .commands import db as db_cmd
+from .commands import cost as cost_cmd
 
 
 def _apps_epilog() -> str:
@@ -113,6 +114,22 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Persist a --write run")
     run_p.add_argument("--show", action="store_true",
                        help="Print result rows inline (non-sensitive results only)")
+
+    cost_p = groups.add_parser(
+        "cost",
+        help="AWS cost & free-tier-expiry report (read-only)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    cost_actions = cost_p.add_subparsers(dest="action", required=True)
+    report_p = cost_actions.add_parser(
+        "report",
+        help="Spend trend, by-service breakdown, run-rate projection, "
+             "and estimated free-tier-expiry increase",
+    )
+    report_p.add_argument("--months", type=int, default=6,
+                          help="Months of trend history (default 6)")
+    report_p.add_argument("--out",
+                          help="Also write the Markdown report to this path")
     return parser
 
 
@@ -174,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "run":
                 print(db_cmd.run(args.target, write=args.write,
                                  commit=args.commit, show=args.show))
+        elif args.group == "cost":
+            if args.action == "report":
+                print(cost_cmd.report(months=args.months, out=args.out))
     except (config.UnknownAppError, FileNotFoundError, vault.VaultError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
