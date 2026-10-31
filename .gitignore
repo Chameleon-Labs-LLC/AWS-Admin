@@ -6,6 +6,8 @@
 *.pem
 secrets.json
 config.json
+# ...but the GrepTile reviewer config is not a secret file.
+!.greptile/config.json
 config.toml
 .scan-reports/
 inbox.env
