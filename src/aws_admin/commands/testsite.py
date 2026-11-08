@@ -206,8 +206,10 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
         verifier = sql.Literal(scram_sha256_verifier(secrets["db_password"]))
         if _rows(cur, "SELECT 1 FROM pg_roles WHERE rolname = %s", (ts.db_role,)):
             _assert_role_is_ours(ts, cur)  # before any mutation
-            cur.execute(sql.SQL("ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB "
-                                "NOCREATEROLE PASSWORD {}").format(role, verifier))
+            # No NOSUPERUSER here: RDS's admin cannot alter that attribute, and
+            # _assert_role_is_ours has already refused any superuser role.
+            cur.execute(sql.SQL("ALTER ROLE {} WITH LOGIN NOCREATEDB NOCREATEROLE "
+                                "PASSWORD {}").format(role, verifier))
             lines.append(f"role {ts.db_role}: password refreshed")
         else:
             cur.execute(sql.SQL("CREATE ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB "
