@@ -287,7 +287,8 @@ def isolation_check(ts: TestSiteSettings, cur, _connect=None) -> str:
     Checks, effective through PUBLIC grants and role membership:
     * role memberships (pg_has_role MEMBER, transitive; also covers roles it
       could only SET ROLE into, which NOINHERIT would hide);
-    * in every other database on the instance the role can CONNECT to: any
+    * in every other database on the instance that accepts connections and
+      the role can CONNECT to (templates such as template1 included): any
       privilege on a table, view, materialized view, foreign table or sequence
       (including column-level grants), and CREATE on any schema.
     Not covered: function EXECUTE (Postgres grants it to PUBLIC by default),
@@ -303,7 +304,7 @@ def isolation_check(ts: TestSiteSettings, cur, _connect=None) -> str:
             WHERE r.rolname NOT IN (%s, 'pg_database_owner')
               AND pg_has_role(%s, r.oid, 'MEMBER')),
           ARRAY(SELECT d.datname FROM pg_database d
-                 WHERE NOT d.datistemplate AND d.datname <> %s
+                 WHERE d.datallowconn AND d.datname <> %s
                    AND has_database_privilege(%s, d.datname, 'CONNECT')
                  ORDER BY 1)
     """, (ts.db_role, ts.db_role, ts.db_name, ts.db_role))
@@ -354,10 +355,11 @@ def drop_database(ts: TestSiteSettings, _connect=None) -> list[str]:
         except psycopg.Error as exc:
             raise ValueError(
                 f"database {ts.db_name} was dropped, but DROP ROLE {ts.db_role} failed "
-                f"({type(exc).__name__}). The role still holds something in another "
-                f"database. In each database the isolation check lists, run "
-                f"`DROP OWNED BY {ts.db_role};` as the admin user, then run "
-                f"`aws-admin testsite down --yes` again.") from exc
+                f"({type(exc).__name__}). The role still owns or holds privileges on "
+                f"something in another database, possibly one it can no longer CONNECT "
+                f"to. As the admin user, run `DROP OWNED BY {ts.db_role};` in every "
+                f"database on the instance (`SELECT datname FROM pg_database WHERE "
+                f"datallowconn`), then run `aws-admin testsite down --yes` again.") from exc
     finally:
         conn.close()
     return [f"database {ts.db_name}: dropped", f"role {ts.db_role}: dropped"]

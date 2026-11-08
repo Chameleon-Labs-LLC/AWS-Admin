@@ -326,10 +326,13 @@ What keeps it isolated:
   app-level vars are `AUTH_SECRET`, `AUTH_TRUST_HOST`, `DATABASE_URL` and
   Cloudflare's public Turnstile test keys; each branch gets `AUTH_URL`,
   `NEXTAUTH_URL` and `SITE_URL` for its own URL.
-- **Separate database:** `CONNECT` is revoked from `PUBLIC`, and every `up`,
-  `status` and `down` checks that the role holds no privilege on any relation in
-  the production database. An existing role is only ever changed if this tool
-  created it (marker comment, or it owns the test database).
+- **Separate database:** `CONNECT` on it is revoked from `PUBLIC`. Every `up`
+  and `status` checks that the role has no role memberships, and no privilege on
+  any table, view, sequence or column and no schema `CREATE` in any other
+  database that accepts connections (templates included). An existing role is
+  only changed if it carries this tool's marker comment; a database is only
+  adopted if that role owns it, and `down` only drops a database that carries
+  the marker too.
 - **No compute role:** the SSR runtime has no AWS credentials. `up` refuses to
   continue if one is attached.
 - **Secrets:** generated locally, stored in the vault
