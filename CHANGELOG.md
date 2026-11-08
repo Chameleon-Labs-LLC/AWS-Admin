@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-08
+
+### Security
+- A database is never adopted without the `aws-admin testsite` marker, even when the marked role owns it (`up` and `down` alike).
+- `branch` and `deploy` recheck that the app carries the `managed-by=aws-admin-testsite` tag and is not a configured production app before changing or building it.
+
 ## [0.11.3] - 2026-11-08
 
 ### Security
