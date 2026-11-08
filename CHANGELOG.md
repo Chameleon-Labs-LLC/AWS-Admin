@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.11.1] - 2026-11-08
 
 ### Security
-- `testsite` verifies ownership before changing anything: the app must be tagged `managed-by=aws-admin-testsite` (or be the app id recorded locally when the tool created it) and must not be a configured production app id; the database must be owned by the managed role. (0.11.1 still adopted a role that owned the test database without carrying the tool's marker; 0.11.2 requires the marker on the role and on the database.)
+- `testsite` verifies ownership before changing the app or database in `up` and `down`: the app must be tagged `managed-by=aws-admin-testsite` (or be the app id recorded locally when the tool created it) and must not be a configured production app id; the database must be owned by the managed role. (0.11.1 still adopted a role that owned the test database without carrying the tool's marker; 0.11.2 requires the marker on the role and on the database for `down`; 0.11.4 requires the database marker for adoption too and rechecks app identity in `branch` and `deploy`.)
 - The isolation check now covers role memberships (including `SET ROLE` targets) and every database the role can reach through `PUBLIC`, failing on table-level privileges and schema `CREATE`. (0.11.1 did not check sequences or column-level grants; 0.11.2 does.)
 - Compute roles are refused at branch level as well as app level.
 

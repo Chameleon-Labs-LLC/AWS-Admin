@@ -517,6 +517,32 @@ def test_down_explains_drop_role_failure(with_testsite):
         ts.drop_database(ts.settings(), _connect=connect_failing)
 
 
+def test_up_refuses_unmarked_database_even_if_marked_role_owns_it(with_testsite):
+    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)],
+                                        [("example_test_role", None)]])
+    with pytest.raises(ValueError, match="no aws-admin testsite marker"):
+        ts.up(github_token="t", client=FakeAmp(), _connect=connect)
+    executed = repr(holder["conn"].cur.executed)
+    assert "ALTER ROLE" not in executed and "COMMENT ON DATABASE" not in executed
+
+
+def test_branch_and_deploy_recheck_app_identity(with_testsite):
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=_fresh())
+    amp.apps["dtest"]["tags"] = {}             # tag removed outside the tool
+    with pytest.raises(ValueError, match="not created by aws-admin testsite"):
+        ts.branch("main", client=amp)
+    with pytest.raises(ValueError, match="not created by aws-admin testsite"):
+        ts.deploy("main", client=amp, _sleep=lambda s: None)
+    amp.apps["d0000000000eo0"]["tags"] = {"managed-by": "aws-admin-testsite"}
+    state = ts._load_state()
+    state["app_id"] = "d0000000000eo0"         # state pointing at a production app
+    ts._save_state(state)
+    with pytest.raises(ValueError, match="configured production app"):
+        ts.deploy("main", client=amp, _sleep=lambda s: None)
+    assert not [c for c in amp.calls if c[0] == "start_job"]
+
+
 # --- teardown ---
 
 def test_down_requires_yes(with_testsite):

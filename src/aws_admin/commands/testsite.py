@@ -179,15 +179,15 @@ def _rows(cur, query, params=None):
     return cur.fetchall()
 
 
-def _db_preflight(ts: TestSiteSettings, cur, _connect=None, check_isolation: bool = True,
-                  require_db_marker: bool = False) -> tuple[bool, bool]:
+def _db_preflight(ts: TestSiteSettings, cur, _connect=None,
+                  check_isolation: bool = True) -> tuple[bool, bool]:
     """Decide, before any mutation, whether the role and database are ours.
 
     Returns (role_exists, db_exists). Refuses when:
     * the role exists but lacks ROLE_MARKER, or is superuser/createrole/createdb;
-    * the database exists but is not owned by the managed role, or that role
-      is not marked (a database is never adopted on name or ownership alone);
-    * require_db_marker (teardown) and the database lacks DB_MARKER;
+    * the database exists but is not owned by the managed role, that role is
+      not marked, or the database itself lacks DB_MARKER (a database is never
+      adopted, altered or dropped on name or ownership alone);
     * check_isolation and an existing role fails the isolation check. Teardown
       skips this so a failed check never blocks removing verified resources.
     """
@@ -214,10 +214,10 @@ def _db_preflight(ts: TestSiteSettings, cur, _connect=None, check_isolation: boo
                 f"database {ts.db_name} exists but is not owned by the managed role "
                 f"{ts.db_role}; it was not created by aws-admin testsite. Refusing to adopt, "
                 f"alter or drop it.")
-        if require_db_marker and db_comment != DB_MARKER:
+        if db_comment != DB_MARKER:
             raise ValueError(
-                f"database {ts.db_name} has no aws-admin testsite marker; refusing to drop it. "
-                f"Run `aws-admin testsite up` once to mark it, or drop it by hand.")
+                f"database {ts.db_name} has no aws-admin testsite marker; refusing to adopt, "
+                f"alter or drop it. It was not created by this tool.")
     if role_exists and check_isolation:
         isolation_check(ts, cur, _connect=_connect)
     return role_exists, db_exists
@@ -347,7 +347,7 @@ def drop_database(ts: TestSiteSettings, _connect=None) -> list[str]:
         cur = conn.cursor()
         # Never drop a database or role this tool did not make. Isolation is not
         # required here: a failed isolation check must not block removing our own role.
-        _db_preflight(ts, cur, check_isolation=False, require_db_marker=True)
+        _db_preflight(ts, cur, check_isolation=False)
         cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
                     .format(sql.Identifier(ts.db_name)))
         try:
@@ -421,18 +421,19 @@ def _find_app(client, name: str) -> dict | None:
 MANAGED_TAG_KEY, MANAGED_TAG_VALUE = "managed-by", "aws-admin-testsite"
 
 
-def _assert_app_is_ours(app: dict) -> None:
+def _assert_app_is_ours(app: dict, allow_recorded: bool = True) -> None:
     """Refuse to update or delete an app this tool did not create.
 
-    Ours = tagged managed-by=aws-admin-testsite, or the app id recorded in the
-    local state when this tool created it. A configured production app id is
-    refused either way, even if it was renamed to the test name in AWS.
+    Ours = tagged managed-by=aws-admin-testsite, or (only when allow_recorded,
+    i.e. in `up`, which then tags it) the app id recorded in the local state
+    when this tool created it. A configured production app id is refused
+    either way, even if it was renamed to the test name in AWS.
     """
     app_id = app["appId"]
     if app_id in {ref.app_id for ref in config.known_apps()}:
         raise ValueError(f"app {app_id} is a configured production app; refusing.")
     tagged = (app.get("tags") or {}).get(MANAGED_TAG_KEY) == MANAGED_TAG_VALUE
-    if not tagged and app_id != _load_state().get("app_id"):
+    if not tagged and not (allow_recorded and app_id == _load_state().get("app_id")):
         raise ValueError(
             f"app '{app.get('name')}' ({app_id}) was not created by aws-admin testsite "
             f"(no {MANAGED_TAG_KEY} tag); refusing to modify or delete it.")
@@ -544,6 +545,7 @@ def branch(name: str, client=None) -> str:
     client = client or amplify_client()
     s = _load_secrets()
     app_id = _app_id()
+    _assert_app_is_ours(client.get_app(appId=app_id)["app"], allow_recorded=False)
     _assert_no_compute_roles(client, app_id)
     creds = base64.b64encode(f"{BASIC_AUTH_USER}:{s['basic_password']}".encode()).decode()
     display = name.replace("/", "-")
@@ -582,6 +584,7 @@ def deploy(name: str, wait: bool = True, client=None, timeout_s: int = 1800,
     """Start a RELEASE build of a branch and, by default, wait for its result."""
     client = client or amplify_client()
     app_id = _app_id()
+    _assert_app_is_ours(client.get_app(appId=app_id)["app"], allow_recorded=False)
     _assert_no_compute_roles(client, app_id)
     job = client.start_job(appId=app_id, branchName=name, jobType="RELEASE")["jobSummary"]
     job_id = job["jobId"]
