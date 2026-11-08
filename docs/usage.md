@@ -296,3 +296,55 @@ aws-admin db clean-results
 ```
 
 deletes the saved CSVs in `~/.config/aws-admin/results/`.
+
+## Test site (`aws-admin testsite`)
+
+`testsite` builds a separate, disposable test copy of one Amplify SSR app: its
+own Amplify app and its own database (plus a login role that owns it) on the
+same RDS instance. Use it to prove a risky change (a framework major, an auth
+change, a migration) on real Amplify before it reaches production.
+
+Add a `[testsite]` table to `config.toml` (see `config.example.toml`). The tool
+refuses names that overlap production: the production database, the admin DB
+user, or any configured app.
+
+```bash
+gh auth token | aws-admin testsite up --github-token-stdin   # role + database + Amplify app (token only needed to create the app)
+aws-admin testsite branch main      # connect a branch: basic auth on, auto-build off
+aws-admin testsite deploy main      # build and wait; exits 4 unless the job SUCCEEDs
+aws-admin testsite exec -- npx prisma db push --skip-generate   # any command, with the test DATABASE_URL in its env only
+aws-admin testsite seed             # upsert an admin and a non-admin email/password test account
+aws-admin testsite smoke main       # read-only HTTP checks; exits 4 if any check fails
+aws-admin testsite status           # app, branches, last jobs, database, isolation check
+aws-admin testsite creds --to-file ~/testsite-creds.txt   # 0600 file for a human; prints the path only
+aws-admin testsite down --yes       # delete the app, drop the database and role, remove local state
+```
+
+What keeps it isolated:
+
+- **Separate app:** none of the source app's env vars exist on it. Its only
+  app-level vars are `AUTH_SECRET`, `AUTH_TRUST_HOST`, `DATABASE_URL` and
+  Cloudflare's public Turnstile test keys; each branch gets `AUTH_URL`,
+  `NEXTAUTH_URL` and `SITE_URL` for its own URL.
+- **Separate database:** `CONNECT` on it is revoked from `PUBLIC`. Every `up`
+  and `status` checks that the role has no role memberships, and no privilege on
+  any table, view, sequence or column and no schema `CREATE` in any other
+  database that accepts connections and that the role can `CONNECT` to
+  (templates included). This is an isolation check, not a full privilege
+  audit: it does not look inside databases the role cannot connect to (grants
+  there become usable if `CONNECT` is granted later), system schemas, function
+  `EXECUTE` (granted to `PUBLIC` by default), large objects, or foreign
+  servers. An existing role is
+  only changed if it carries this tool's marker comment; a database is only
+  adopted if that role owns it, and `down` only drops a database that carries
+  the marker too.
+- **No compute role:** the SSR runtime has no AWS credentials. `up` refuses to
+  continue if one is attached.
+- **Secrets:** generated locally, stored in the vault
+  (`~/.config/aws-admin/testsite/secrets.enc`), never printed. The role password
+  is sent to Postgres as a SCRAM-SHA-256 verifier, so plaintext never reaches
+  the server or its logs.
+
+If the app's migration history cannot build its schema from an empty database,
+build it with `testsite exec -- npx prisma db push`, then mark each migration
+applied with `testsite exec -- npx prisma migrate resolve --applied <name>`.

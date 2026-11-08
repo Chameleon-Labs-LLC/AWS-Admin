@@ -108,6 +108,15 @@ def _settings() -> Settings:
     return _load_settings_cached(str(state_dir()))
 
 
+def load_raw() -> dict:
+    """The parsed config.toml, for optional tables such as [testsite]."""
+    path = config_path()
+    if not path.exists():
+        raise ConfigError(f"No config at {path}. Copy config.example.toml there first.")
+    with path.open("rb") as fh:
+        return tomllib.load(fh)
+
+
 # PEP 562: resolve sensitive constants lazily so existing call sites
 # (config.ACCOUNT_ID / config.DB_HOST / config.DB_NAME) are unchanged.
 def __getattr__(name: str):

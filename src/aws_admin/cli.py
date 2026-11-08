@@ -10,6 +10,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from . import config, vault
 from .commands import env as env_cmd
 from .commands import db as db_cmd
+from .commands import testsite as ts_cmd
 
 
 def _apps_epilog() -> str:
@@ -113,6 +114,27 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Persist a --write run")
     run_p.add_argument("--show", action="store_true",
                        help="Print result rows inline (non-sensitive results only)")
+
+    ts_p = groups.add_parser("testsite", help="Agent-managed test copy of an app ([testsite] in config)")
+    ts_actions = ts_p.add_subparsers(dest="action", required=True)
+    up_p = ts_actions.add_parser("up", help="Create/refresh the test role, database and Amplify app")
+    up_p.add_argument("--github-token-stdin", action="store_true",
+                      help="Read a GitHub token from stdin (needed only to create the app)")
+    br_p = ts_actions.add_parser("branch", help="Connect a branch (basic auth, no auto-build)")
+    br_p.add_argument("name")
+    dep_p = ts_actions.add_parser("deploy", help="Start a RELEASE build of a branch")
+    dep_p.add_argument("name")
+    dep_p.add_argument("--no-wait", action="store_true", help="Return once the job starts")
+    ts_actions.add_parser("seed", help="Upsert the admin and non-admin test accounts")
+    sm_p = ts_actions.add_parser("smoke", help="Read-only HTTP checks on a deployed branch")
+    sm_p.add_argument("name")
+    ts_actions.add_parser("status", help="App, branches, last jobs, DB and isolation check")
+    ex_p = ts_actions.add_parser("exec", help="Run a command with the test DATABASE_URL in its env (never printed)")
+    ex_p.add_argument("argv", nargs=argparse.REMAINDER, help="-- <command> [args...]")
+    cr_p = ts_actions.add_parser("creds", help="Write test credentials to a 0600 file (prints the path only)")
+    cr_p.add_argument("--to-file", required=True)
+    down_p = ts_actions.add_parser("down", help="Delete the test app, database and role")
+    down_p.add_argument("--yes", action="store_true")
     return parser
 
 
@@ -174,6 +196,33 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "run":
                 print(db_cmd.run(args.target, write=args.write,
                                  commit=args.commit, show=args.show))
+        elif args.group == "testsite":
+            if args.action == "up":
+                token = sys.stdin.readline().strip() if args.github_token_stdin else None
+                print(ts_cmd.up(github_token=token or None))
+            elif args.action == "branch":
+                print(ts_cmd.branch(args.name))
+            elif args.action == "deploy":
+                print(ts_cmd.deploy(args.name, wait=not args.no_wait))
+            elif args.action == "seed":
+                print(ts_cmd.seed())
+            elif args.action == "smoke":
+                print(ts_cmd.smoke(args.name))
+            elif args.action == "status":
+                print(ts_cmd.status())
+            elif args.action == "exec":
+                argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+                return ts_cmd.exec_with_db(argv)
+            elif args.action == "creds":
+                print(ts_cmd.creds_to_file(args.to_file))
+            elif args.action == "down":
+                print(ts_cmd.down(yes=args.yes))
+    except ts_cmd.CheckFailed as e:
+        print(str(e))
+        return 4
+    except config.ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     except (config.UnknownAppError, FileNotFoundError, vault.VaultError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

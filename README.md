@@ -87,6 +87,9 @@ aws-admin db run ./change.sql --write --commit   # actually persist the write
 aws-admin db clean-results       # delete saved result files
 ```
 
+A disposable, isolated test copy of an app (its own Amplify app and database) is
+`aws-admin testsite`; see [docs/usage.md](docs/usage.md#test-site-aws-admin-testsite).
+
 - Results are written to `~/.config/aws-admin/results/<name>-<timestamp>.csv`
   (owner-only file mode); only a summary is printed. Use `--show` for
   non-sensitive results like counts.
