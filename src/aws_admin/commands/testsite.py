@@ -507,7 +507,7 @@ def deploy(name: str, wait: bool = True, client=None, timeout_s: int = 1800,
         return f"job {job_id} started on {name}"
     deadline = time.monotonic() + timeout_s
     status = job.get("status", "PENDING")
-    while status in ("PENDING", "PROVISIONING", "RUNNING", "CANCELLING"):
+    while status in ("CREATED", "PENDING", "PROVISIONING", "RUNNING", "CANCELLING"):
         if time.monotonic() > deadline:
             raise CheckFailed(f"job {job_id} on {name}: still {status} after {timeout_s}s")
         _sleep(poll_s)

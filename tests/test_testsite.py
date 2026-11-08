@@ -340,6 +340,15 @@ def test_deploy_waits_for_terminal_status(with_testsite):
     assert "SUCCEED" in out
 
 
+def test_deploy_polls_through_created_status(with_testsite):
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=_fresh())
+    amp.start_job = lambda **kw: {"jobSummary": {"jobId": "8", "status": "CREATED"}}
+    seq = iter(["PENDING", "RUNNING", "SUCCEED"])
+    amp.get_job = lambda **kw: {"job": {"summary": {"status": next(seq)}}}
+    assert "SUCCEED" in ts.deploy("main", client=amp, _sleep=lambda s: None)
+
+
 def test_failed_deploy_raises_and_cli_exits_nonzero(with_testsite, monkeypatch, capsys):
     amp = FakeAmp()
     ts.up(github_token="t", client=amp, _connect=_fresh())
