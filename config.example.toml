@@ -35,3 +35,14 @@ aliases = ["my"]
 [apps.AnotherApp]
 app_id = "d0000000000001"
 aliases = ["other"]
+
+# Optional: `aws-admin testsite` builds a separate, agent-managed test copy of
+# one app (its own Amplify app + its own database on the same RDS instance).
+# source_app is the app it copies the repository and logging role from; the
+# test app never receives any of that app's env vars. Names must not match any
+# production app, database, or the admin DB user (the tool refuses).
+[testsite]
+app_name = "MyApp-Test"
+source_app = "MyApp"
+db_name = "your_db_test"
+db_role = "your_db_test_role"
