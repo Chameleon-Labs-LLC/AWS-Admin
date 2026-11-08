@@ -6,16 +6,17 @@ import psycopg
 from .. import config, vault
 
 
-def connect(read_only: bool = True, _connect=None):
+def connect(read_only: bool = True, _connect=None, dbname: str | None = None):
     """Open a psycopg connection (sslmode=require). `_connect` is injectable for tests.
 
     The connection's transactions are read-only unless `read_only=False`.
+    `dbname` defaults to the configured database.
     """
     connect_fn = _connect or psycopg.connect
     conn = connect_fn(
         host=config.DB_HOST,
         port=config.DB_PORT,
-        dbname=config.DB_NAME,
+        dbname=dbname or config.DB_NAME,
         user=config.DB_USER,
         password=vault.get_db_password(),
         sslmode=config.DB_SSLMODE,

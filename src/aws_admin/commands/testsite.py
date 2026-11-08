@@ -59,6 +59,7 @@ BRANCH_ENV_KEYS = ("AUTH_URL", "NEXTAUTH_URL", "SITE_URL")
 
 @dataclass(frozen=True)
 class TestSiteSettings:
+    """Names from the [testsite] table in config.toml."""
     app_name: str
     source_app: str
     db_name: str
@@ -83,6 +84,7 @@ def settings() -> TestSiteSettings:
 
 
 def _guard(ts: TestSiteSettings) -> None:
+    """Refuse test-site names that overlap production or are not plain identifiers."""
     if ts.db_name.lower() == str(config.DB_NAME).lower():
         raise ValueError("testsite db_name equals the production database name; refusing.")
     if ts.db_role.lower() == config.DB_USER.lower():
@@ -97,18 +99,22 @@ def _guard(ts: TestSiteSettings) -> None:
 
 
 def _dir() -> Path:
+    """Local state directory for the test site (inside AWS_ADMIN_HOME)."""
     return config.state_dir() / "testsite"
 
 
 def _state_path() -> Path:
+    """Path of the non-secret state file (app id, branch display names)."""
     return _dir() / "state.json"
 
 
 def _secrets_path() -> Path:
+    """Path of the encrypted secrets file."""
     return _dir() / "secrets.enc"
 
 
 def _load_state() -> dict:
+    """Read the non-secret state, or {} when none exists yet."""
     path = _state_path()
     if not path.exists():
         return {}
@@ -116,12 +122,14 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
+    """Write the non-secret state with owner-only permissions."""
     _dir().mkdir(parents=True, exist_ok=True)
     os.chmod(_dir(), 0o700)
     vault._write_private(_state_path(), json.dumps(state, indent=2, sort_keys=True).encode())
 
 
 def _load_secrets(create: bool = False) -> dict:
+    """Decrypt the test-site secrets, generating any that are missing."""
     path = _secrets_path()
     if path.exists():
         data = vault.decrypt(path.read_bytes())
@@ -165,11 +173,13 @@ class CheckFailed(RuntimeError):
 
 
 def _rows(cur, query, params=None):
+    """Execute a query and return every row."""
     cur.execute(query, params)
     return cur.fetchall()
 
 
-def _db_preflight(ts: TestSiteSettings, cur) -> tuple[bool, bool]:
+def _db_preflight(ts: TestSiteSettings, cur, _connect=None,
+                  check_isolation: bool = True) -> tuple[bool, bool]:
     """Decide, before any mutation, whether the role and database are ours.
 
     Returns (role_exists, db_exists). Refuses when:
@@ -177,7 +187,8 @@ def _db_preflight(ts: TestSiteSettings, cur) -> tuple[bool, bool]:
       anything else on the instance: never adopt or drop it);
     * the role exists but is powerful, or carries neither the marker comment
       nor ownership of the test database;
-    * an existing role fails the isolation check.
+    * an existing role fails the isolation check (skipped for `down`, which
+      only ever removes resources whose ownership was just verified).
     """
     role_rows = _rows(cur, """
         SELECT shobj_description(r.oid, 'pg_authid'),
@@ -199,7 +210,8 @@ def _db_preflight(ts: TestSiteSettings, cur) -> tuple[bool, bool]:
             raise ValueError(
                 f"role {ts.db_role} exists but was not created by aws-admin testsite; "
                 f"refusing to modify it. Pick another db_role.")
-        isolation_check(ts, cur)
+        if check_isolation:
+            isolation_check(ts, cur, _connect=_connect)
     return role_exists, db_exists
 
 
@@ -214,7 +226,7 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
         cur = conn.cursor()
         role, db = sql.Identifier(ts.db_role), sql.Identifier(ts.db_name)
         verifier = sql.Literal(scram_sha256_verifier(secrets["db_password"]))
-        role_exists, db_exists = _db_preflight(ts, cur)  # before any mutation
+        role_exists, db_exists = _db_preflight(ts, cur, _connect=_connect)  # before any mutation
         if role_exists:
             # No NOSUPERUSER here: RDS's admin cannot alter that attribute, and
             # _db_preflight has already refused any superuser role.
@@ -235,55 +247,88 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
             lines.append(f"database {ts.db_name}: created")
         cur.execute(sql.SQL("REVOKE CONNECT, TEMPORARY ON DATABASE {} FROM PUBLIC").format(db))
         cur.execute(sql.SQL("GRANT CONNECT, TEMPORARY ON DATABASE {} TO {}").format(db, role))
-        lines.append(isolation_check(ts, cur))
+        lines.append(isolation_check(ts, cur, _connect=_connect))
     finally:
         conn.close()
     return lines
 
 
-def isolation_check(ts: TestSiteSettings, cur) -> str:
-    """Fail unless the test role can reach nothing in the production database.
+_OBJECT_PRIVILEGES_SQL = """
+    SELECT
+      (SELECT count(*) FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname NOT LIKE 'pg_toast%%'
+          AND has_table_privilege(%s, c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')),
+      (SELECT count(*) FROM pg_namespace n
+        WHERE n.nspname NOT LIKE 'pg_%%' AND n.nspname <> 'information_schema'
+          AND has_schema_privilege(%s, n.oid, 'CREATE'))
+"""
 
-    Two counts: relations it holds a privilege on directly, and roles it is a
-    member of (transitively; pg_has_role MEMBER also covers roles it could
-    only SET ROLE into, which NOINHERIT would hide from the first count).
+
+def isolation_check(ts: TestSiteSettings, cur, _connect=None) -> str:
+    """Fail unless the test role can reach no object outside its own database.
+
+    Checks, effective through PUBLIC grants and role membership:
+    * role memberships (pg_has_role MEMBER, transitive; also covers roles it
+      could only SET ROLE into, which NOINHERIT would hide);
+    * in every other database on the instance the role can CONNECT to:
+      privileges on any relation, and CREATE on any schema.
+    Bare CONNECT/TEMP (Postgres grants those to PUBLIC by default) is reported
+    by name, not failed: with no object privileges and no CREATE it exposes
+    only catalog metadata. Removing it means revoking PUBLIC's CONNECT on the
+    production databases, which is a production change for a human to make.
     """
     rows = _rows(cur, """
         SELECT
-          (SELECT count(*) FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
-              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-              AND n.nspname NOT LIKE 'pg_toast%%'
-              AND has_table_privilege(%s, c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')),
           (SELECT count(*) FROM pg_roles r
             WHERE r.rolname NOT IN (%s, 'pg_database_owner')
-              AND pg_has_role(%s, r.oid, 'MEMBER'))
-    """, (ts.db_role, ts.db_role, ts.db_role))
-    tables, memberships = rows[0] if rows else (0, 0)
-    if tables or memberships:
-        raise ValueError(
-            f"isolation check FAILED: role {ts.db_role} has privileges on {tables} "
-            f"production relation(s) and is a member of {memberships} other role(s). "
-            f"Fix before using the test site.")
-    return (f"isolation: role {ts.db_role} has no privilege on any production relation "
-            f"and no role memberships")
+              AND pg_has_role(%s, r.oid, 'MEMBER')),
+          ARRAY(SELECT d.datname FROM pg_database d
+                 WHERE NOT d.datistemplate AND d.datname <> %s
+                   AND has_database_privilege(%s, d.datname, 'CONNECT')
+                 ORDER BY 1)
+    """, (ts.db_role, ts.db_role, ts.db_name, ts.db_role))
+    memberships, reachable = rows[0] if rows else (0, [])
+    reachable = list(reachable or [])
+    problems = [f"member of {memberships} other role(s)"] if memberships else []
+    for dbname in reachable:
+        conn = (_connect or connection.connect)(read_only=True, dbname=dbname)
+        try:
+            counts = _rows(conn.cursor(), _OBJECT_PRIVILEGES_SQL, (ts.db_role, ts.db_role))
+        finally:
+            conn.close()
+        tables, schemas = counts[0] if counts else (0, 0)
+        if tables or schemas:
+            problems.append(f"{dbname}: privileges on {tables} relation(s), "
+                            f"CREATE on {schemas} schema(s)")
+    if problems:
+        raise ValueError(f"isolation check FAILED: role {ts.db_role}: " + "; ".join(problems)
+                         + ". Fix before using the test site.")
+    return (f"isolation: role {ts.db_role} has no role memberships, and no object privilege "
+            f"or schema CREATE in the {len(reachable)} other database(s) it can CONNECT to "
+            f"through PUBLIC ({', '.join(reachable) or 'none'})")
 
 
 def database_url(ts: TestSiteSettings, secrets: dict) -> str:
+    """The test DATABASE_URL (contains the role password; never print it)."""
     pw = urllib.parse.quote(secrets["db_password"], safe="")
     return (f"postgresql://{ts.db_role}:{pw}@{config.DB_HOST}:{config.DB_PORT}/"
             f"{ts.db_name}?sslmode=require&connection_limit=2")
 
 
 def drop_database(ts: TestSiteSettings, _connect=None) -> list[str]:
+    """Drop the test database and role, after verifying this tool owns both."""
     from psycopg import sql
 
     conn = (_connect or connection.connect)(read_only=False)
     conn.autocommit = True
     try:
         cur = conn.cursor()
-        _db_preflight(ts, cur)  # never drop a database or role this tool did not make
+        # Never drop a database or role this tool did not make. Isolation is not
+        # required here: a failed isolation check must not block removing our own role.
+        _db_preflight(ts, cur, check_isolation=False)
         cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
                     .format(sql.Identifier(ts.db_name)))
         cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ts.db_role)))
@@ -330,6 +375,7 @@ def seed(ts: TestSiteSettings | None = None, _connect=None) -> str:
 # --------------------------------------------------------------------------
 
 def _find_app(client, name: str) -> dict | None:
+    """Return the Amplify app with this exact name, or None (follows pagination)."""
     token = None
     while True:
         kwargs = {"maxResults": 100}
@@ -365,6 +411,7 @@ def _assert_app_is_ours(app: dict) -> None:
 
 
 def _list_branches(client, app_id: str) -> list[dict]:
+    """Every branch of an Amplify app (follows pagination)."""
     out, token = [], None
     while True:
         kwargs = {"appId": app_id, "maxResults": 50}
@@ -390,6 +437,7 @@ def _assert_no_compute_roles(client, app_id: str) -> None:
 
 
 def _app_env(ts: TestSiteSettings, s: dict) -> dict:
+    """App-level env vars for the test app: generated or public test values only."""
     return {
         "AUTH_SECRET": s["auth_secret"],
         "AUTH_TRUST_HOST": "true",
@@ -400,11 +448,13 @@ def _app_env(ts: TestSiteSettings, s: dict) -> dict:
 
 
 def _origin(app_id: str, display_name: str) -> str:
+    """The https origin Amplify serves a branch on."""
     return f"https://{display_name}.{app_id}.amplifyapp.com"
 
 
 def ensure_app(ts: TestSiteSettings, s: dict, github_token: str | None = None,
                client=None) -> tuple[str, list[str]]:
+    """Create the test app, or update it after verifying this tool owns it."""
     client = client or amplify_client()
     source = client.get_app(appId=config.resolve_app(ts.source_app).app_id)["app"]
     fields = dict(
@@ -445,6 +495,7 @@ def ensure_app(ts: TestSiteSettings, s: dict, github_token: str | None = None,
 
 
 def up(github_token: str | None = None, client=None, _connect=None) -> str:
+    """Create or refresh the test role, database and Amplify app. Idempotent."""
     ts = settings()
     s = _load_secrets(create=True)
     lines = ensure_database(ts, s, _connect=_connect)
@@ -453,6 +504,7 @@ def up(github_token: str | None = None, client=None, _connect=None) -> str:
 
 
 def _app_id() -> str:
+    """The test app id recorded by `up`."""
     app_id = _load_state().get("app_id")
     if not app_id:
         raise FileNotFoundError("No test app recorded. Run `aws-admin testsite up` first.")
@@ -472,6 +524,7 @@ def branch(name: str, client=None) -> str:
                   enablePullRequestPreview=False)
 
     def env_for(display_name):
+        """Branch-level env vars for a branch served at `display_name`."""
         origin = _origin(app_id, display_name)
         return {"AUTH_URL": origin, "NEXTAUTH_URL": origin, "SITE_URL": origin}
 
@@ -498,6 +551,7 @@ def branch(name: str, client=None) -> str:
 
 def deploy(name: str, wait: bool = True, client=None, timeout_s: int = 1800,
            poll_s: int = 20, _sleep=time.sleep) -> str:
+    """Start a RELEASE build of a branch and, by default, wait for its result."""
     client = client or amplify_client()
     app_id = _app_id()
     _assert_no_compute_roles(client, app_id)
@@ -521,6 +575,7 @@ def deploy(name: str, wait: bool = True, client=None, timeout_s: int = 1800,
 
 
 def status(client=None, _connect=None) -> str:
+    """Summarize the app, branches, last jobs, database and isolation check."""
     ts = settings()
     state = _load_state()
     if not state.get("app_id"):
@@ -544,18 +599,21 @@ def status(client=None, _connect=None) -> str:
         cur = conn.cursor()
         exists = bool(_rows(cur, "SELECT 1 FROM pg_database WHERE datname = %s", (ts.db_name,)))
         lines.append(f"database {ts.db_name}: {'exists' if exists else 'MISSING'}")
-        lines.append(isolation_check(ts, cur))
+        lines.append(isolation_check(ts, cur, _connect=_connect))
     finally:
         conn.close()
     return "\n".join(lines)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Opener handler that surfaces redirects instead of following them."""
     def redirect_request(self, *args, **kwargs):
+        """Do not follow redirects; the caller inspects the 3xx itself."""
         return None
 
 
 def _http(opener, url, auth=None, data=None):
+    """One request; returns (status, headers, body) and never raises on HTTP errors."""
     req = urllib.request.Request(url, data=data)
     if auth:
         req.add_header("Authorization", f"Basic {auth}")
@@ -598,9 +656,11 @@ def smoke(name: str, _opener_factory=None) -> str:
     results = []
 
     def check(label, ok, detail):
+        """Record one PASS/FAIL result."""
         results.append((ok, f"{'PASS' if ok else 'FAIL'}  {label}: {detail}"))
 
     def skip(label, reason):
+        """Record a check that cannot run on this host, with the reason."""
         results.append((True, f"SKIP  {label}: {reason}"))
 
     code, _, _ = _http(opener, base + "/")
@@ -687,6 +747,7 @@ def creds_to_file(path: str) -> str:
 
 
 def down(yes: bool = False, client=None, _connect=None) -> str:
+    """Delete the test app, database and role (ownership verified first) and local state."""
     if not yes:
         raise ValueError("`testsite down` deletes the test app and test database; pass --yes.")
     ts = settings()

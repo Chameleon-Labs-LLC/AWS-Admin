@@ -133,16 +133,23 @@ class ScriptedConn:
         self.closed = True
 
 
-# fetchall() sequences, in query order:
-# preflight role row, preflight db owner, [isolation if role exists], final isolation
-FRESH = [[], [], [(0, 0)]]
-OURS = [[(ts.ROLE_MARKER, False)], [("example_test_role",)], [(0, 0)], [(0, 0)]]
+# fetchall() sequences on the admin connection, in query order:
+# preflight role row, preflight db owner, [isolation if role exists], final isolation.
+# An isolation row is (role memberships, [other databases the role can CONNECT to]).
+CLEAN = [(0, [])]
+FRESH = [[], [], CLEAN]
+OURS = [[(ts.ROLE_MARKER, False)], [("example_test_role",)], CLEAN, CLEAN]
 
 
-def _connect_factory(results):
-    holder = {}
+def _connect_factory(results, per_db=None):
+    """Admin connections replay `results`; a connection opened with dbname=X
+    replays per_db[X] (the per-database privilege counts)."""
+    holder = {"dbs": []}
 
-    def connect(read_only=True):
+    def connect(read_only=True, dbname=None):
+        if dbname is not None:
+            holder["dbs"].append(dbname)
+            return ScriptedConn((per_db or {}).get(dbname, [[(0, 0)]]))
         holder["conn"] = ScriptedConn(results)
         holder["conn"].read_only = read_only
         return holder["conn"]
@@ -236,7 +243,7 @@ def test_up_creating_app_without_token_fails(with_testsite):
     ((ts.ROLE_MARKER, True), [("example_test_role",)]),     # ours by marker, but powerful
 ])
 def test_existing_foreign_role_is_refused_before_any_change(with_testsite, role_row, db_rows):
-    connect, holder = _connect_factory([[role_row], db_rows, [(0, 0)]])
+    connect, holder = _connect_factory([[role_row], db_rows, CLEAN])
     with pytest.raises(ValueError, match="not created by aws-admin testsite"):
         ts.up(github_token="t", client=FakeAmp(), _connect=connect)
     executed = repr(holder["conn"].cur.executed)
@@ -255,18 +262,46 @@ def test_existing_database_not_owned_by_role_is_refused(with_testsite):
     assert "DROP" not in repr(holder2["conn"].cur.executed)
 
 
-@pytest.mark.parametrize("iso", [(5, 0), (0, 1)])   # table privileges, or a role membership
-def test_existing_role_failing_isolation_is_refused_before_alter(with_testsite, iso):
-    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)], [], [iso]])
+@pytest.mark.parametrize("iso,per_db", [
+    ([(1, [])], None),                                    # a role membership
+    ([(0, ["prod_db"])], {"prod_db": [[(5, 0)]]}),        # relation privileges elsewhere
+    ([(0, ["prod_db"])], {"prod_db": [[(0, 1)]]}),        # CREATE on a schema elsewhere
+])
+def test_existing_role_failing_isolation_is_refused_before_alter(with_testsite, iso, per_db):
+    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)], [], iso], per_db)
     with pytest.raises(ValueError, match="isolation check FAILED"):
         ts.up(github_token="t", client=FakeAmp(), _connect=connect)
     assert "ALTER ROLE" not in repr(holder["conn"].cur.executed)
 
 
-@pytest.mark.parametrize("iso", [(3, 0), (0, 2)])
-def test_isolation_failure_after_create_raises(with_testsite, iso):
+def test_isolation_checks_every_reachable_database(with_testsite):
+    connect, holder = _connect_factory([[], [], [(0, ["db_a", "db_b"])]],
+                                       {"db_a": [[(0, 0)]], "db_b": [[(0, 0)]]})
+    out = ts.up(github_token="t", client=FakeAmp(), _connect=connect)
+    assert holder["dbs"] == ["db_a", "db_b"]
+    assert "2 other database(s)" in out and "db_a, db_b" in out
+    assert "pg_has_role" in repr(holder["conn"].cur.executed)
+
+
+@pytest.mark.parametrize("iso,per_db", [
+    ([(2, [])], None),
+    ([(0, ["prod_db"])], {"prod_db": [[(0, 3)]]}),
+])
+def test_isolation_failure_after_create_raises(with_testsite, iso, per_db):
+    connect, _ = _connect_factory([[], [], iso], per_db)
     with pytest.raises(ValueError, match="isolation check FAILED"):
-        ts.up(github_token="t", client=FakeAmp(), _connect=_connect_factory([[], [], [iso]])[0])
+        ts.up(github_token="t", client=FakeAmp(), _connect=connect)
+
+
+def test_down_still_removes_owned_resources_when_isolation_fails(with_testsite):
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=_fresh())
+    # ours by marker + ownership; isolation would fail, but down must not depend on it
+    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)], [("example_test_role",)],
+                                        [(3, [])]])
+    ts.down(yes=True, client=amp, _connect=connect)
+    executed = repr(holder["conn"].cur.executed)
+    assert "DROP DATABASE" in executed and "DROP ROLE" in executed
 
 
 # --- app identity and compute roles ---
@@ -425,7 +460,7 @@ def test_down_deletes_app_db_and_state(with_testsite):
     amp = FakeAmp()
     ts.up(github_token="t", client=amp, _connect=_fresh())
     connect2, holder2 = _connect_factory([[(ts.ROLE_MARKER, False)],
-                                          [("example_test_role",)], [(0, 0)]])
+                                          [("example_test_role",)]])
     out = ts.down(yes=True, client=amp, _connect=connect2)
     assert ("delete_app", {"appId": "dtest"}) in amp.calls
     assert "DROP DATABASE" in repr(holder2["conn"].cur.executed)
