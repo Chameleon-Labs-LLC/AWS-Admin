@@ -252,6 +252,34 @@ def test_creds_file_is_private_and_output_has_path_only(with_testsite, tmp_path)
     assert (target.stat().st_mode & 0o777) == 0o600
 
 
+def test_exec_passes_db_url_in_env_not_argv(with_testsite):
+    connect, _ = _connect_factory([[], [], [(0,)]])
+    ts.up(github_token="t", client=FakeAmp(), _connect=connect)
+    seen = {}
+
+    class R:
+        returncode = 0
+
+    def fake_run(argv, env):
+        seen["argv"], seen["env"] = argv, env
+        return R()
+
+    assert ts.exec_with_db(["npx", "prisma", "db", "push"], _run=fake_run) == 0
+    url = seen["env"]["DATABASE_URL"]
+    assert "example_db_test" in url and "connection_limit=2" in url
+    assert all(url not in a for a in seen["argv"])
+    with pytest.raises(ValueError):
+        ts.exec_with_db([], _run=fake_run)
+
+
+def test_cli_exec_strips_double_dash(with_testsite, monkeypatch):
+    from aws_admin import cli
+    got = {}
+    monkeypatch.setattr(ts, "exec_with_db", lambda argv: got.setdefault("argv", argv) and 0)
+    cli.main(["testsite", "exec", "--", "echo", "hi"])
+    assert got["argv"] == ["echo", "hi"]
+
+
 def test_down_requires_yes(with_testsite):
     with pytest.raises(ValueError, match="--yes"):
         ts.down()

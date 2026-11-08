@@ -503,6 +503,24 @@ def smoke(name: str, _opener_factory=None) -> str:
     return "\n".join([line for _, line in results] + [f"{passed}/{len(results)} passed"])
 
 
+def exec_with_db(argv: list[str], _run=None) -> int:
+    """Run a command with the test DATABASE_URL in its environment only.
+
+    For schema work such as `npx prisma db push`. The URL is never printed or
+    placed on the command line; the child's own output is passed through, so
+    only run commands that do not echo their environment.
+    """
+    import subprocess
+
+    if not argv:
+        raise ValueError("usage: aws-admin testsite exec -- <command> [args...]")
+    ts = settings()
+    s = _load_secrets()
+    env = dict(os.environ, DATABASE_URL=database_url(ts, s))
+    run = _run or subprocess.run
+    return run(argv, env=env).returncode
+
+
 def creds_to_file(path: str) -> str:
     """Write the basic-auth and test-account credentials to a 0600 file for a human.
 

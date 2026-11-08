@@ -129,6 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
     sm_p = ts_actions.add_parser("smoke", help="Read-only HTTP checks on a deployed branch")
     sm_p.add_argument("name")
     ts_actions.add_parser("status", help="App, branches, last jobs, DB and isolation check")
+    ex_p = ts_actions.add_parser("exec", help="Run a command with the test DATABASE_URL in its env (never printed)")
+    ex_p.add_argument("argv", nargs=argparse.REMAINDER, help="-- <command> [args...]")
     cr_p = ts_actions.add_parser("creds", help="Write test credentials to a 0600 file (prints the path only)")
     cr_p.add_argument("--to-file", required=True)
     down_p = ts_actions.add_parser("down", help="Delete the test app, database and role")
@@ -208,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(ts_cmd.smoke(args.name))
             elif args.action == "status":
                 print(ts_cmd.status())
+            elif args.action == "exec":
+                argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+                return ts_cmd.exec_with_db(argv)
             elif args.action == "creds":
                 print(ts_cmd.creds_to_file(args.to_file))
             elif args.action == "down":
