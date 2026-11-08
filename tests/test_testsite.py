@@ -449,6 +449,23 @@ def test_cli_exec_strips_double_dash(with_testsite, monkeypatch):
     assert got["argv"] == ["echo", "hi"]
 
 
+def test_status_reports_missing_role_instead_of_failing(with_testsite):
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=_fresh())
+    # database exists, role gone (removed outside the tool)
+    connect, holder = _connect_factory([[(1,)], []])
+    out = ts.status(client=amp, _connect=connect)
+    assert "role example_test_role: MISSING" in out and "database example_db_test: exists" in out
+    assert "pg_has_role" not in repr(holder["conn"].cur.executed)
+
+
+def test_status_runs_isolation_when_role_exists(with_testsite):
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=_fresh())
+    connect, _ = _connect_factory([[(1,)], [(1,)], CLEAN])
+    assert "isolation: role example_test_role" in ts.status(client=amp, _connect=connect)
+
+
 # --- teardown ---
 
 def test_down_requires_yes(with_testsite):

@@ -599,7 +599,10 @@ def status(client=None, _connect=None) -> str:
         cur = conn.cursor()
         exists = bool(_rows(cur, "SELECT 1 FROM pg_database WHERE datname = %s", (ts.db_name,)))
         lines.append(f"database {ts.db_name}: {'exists' if exists else 'MISSING'}")
-        lines.append(isolation_check(ts, cur, _connect=_connect))
+        if _rows(cur, "SELECT 1 FROM pg_roles WHERE rolname = %s", (ts.db_role,)):
+            lines.append(isolation_check(ts, cur, _connect=_connect))
+        else:
+            lines.append(f"role {ts.db_role}: MISSING (run `aws-admin testsite up`)")
     finally:
         conn.close()
     return "\n".join(lines)
