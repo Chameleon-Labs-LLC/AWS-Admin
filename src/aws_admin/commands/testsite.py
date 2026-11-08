@@ -169,28 +169,38 @@ def _rows(cur, query, params=None):
     return cur.fetchall()
 
 
-def _assert_role_is_ours(ts: TestSiteSettings, cur) -> None:
-    """Refuse to touch an existing role unless this tool made it.
+def _db_preflight(ts: TestSiteSettings, cur) -> tuple[bool, bool]:
+    """Decide, before any mutation, whether the role and database are ours.
 
-    Ours = it carries ROLE_MARKER, or it owns the test database (roles created
-    before the marker existed). Either way it must also pass the isolation
-    check. This runs before any ALTER/DROP, so a misconfigured db_role that
-    names a production role is never modified.
+    Returns (role_exists, db_exists). Refuses when:
+    * the database exists but is not owned by the managed role (it could be
+      anything else on the instance: never adopt or drop it);
+    * the role exists but is powerful, or carries neither the marker comment
+      nor ownership of the test database;
+    * an existing role fails the isolation check.
     """
-    rows = _rows(cur, """
+    role_rows = _rows(cur, """
         SELECT shobj_description(r.oid, 'pg_authid'),
-               EXISTS (SELECT 1 FROM pg_database d WHERE d.datname = %s AND d.datdba = r.oid),
                r.rolsuper OR r.rolcreaterole OR r.rolcreatedb
         FROM pg_roles r WHERE r.rolname = %s
-    """, (ts.db_name, ts.db_role))
-    if not rows:
-        return
-    comment, owns_test_db, powerful = rows[0]
-    if powerful or not (comment == ROLE_MARKER or owns_test_db):
+    """, (ts.db_role,))
+    db_rows = _rows(cur, """
+        SELECT pg_get_userbyid(d.datdba) FROM pg_database d WHERE d.datname = %s
+    """, (ts.db_name,))
+    role_exists, db_exists = bool(role_rows), bool(db_rows)
+    owner = db_rows[0][0] if db_exists else None
+    if db_exists and owner != ts.db_role:
         raise ValueError(
-            f"role {ts.db_role} exists but was not created by aws-admin testsite; "
-            f"refusing to modify it. Pick another db_role.")
-    isolation_check(ts, cur)
+            f"database {ts.db_name} exists but is not owned by {ts.db_role}; it was not "
+            f"created by aws-admin testsite. Refusing to adopt, alter or drop it.")
+    if role_exists:
+        comment, powerful = role_rows[0]
+        if powerful or not (comment == ROLE_MARKER or owner == ts.db_role):
+            raise ValueError(
+                f"role {ts.db_role} exists but was not created by aws-admin testsite; "
+                f"refusing to modify it. Pick another db_role.")
+        isolation_check(ts, cur)
+    return role_exists, db_exists
 
 
 def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[str]:
@@ -204,10 +214,10 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
         cur = conn.cursor()
         role, db = sql.Identifier(ts.db_role), sql.Identifier(ts.db_name)
         verifier = sql.Literal(scram_sha256_verifier(secrets["db_password"]))
-        if _rows(cur, "SELECT 1 FROM pg_roles WHERE rolname = %s", (ts.db_role,)):
-            _assert_role_is_ours(ts, cur)  # before any mutation
+        role_exists, db_exists = _db_preflight(ts, cur)  # before any mutation
+        if role_exists:
             # No NOSUPERUSER here: RDS's admin cannot alter that attribute, and
-            # _assert_role_is_ours has already refused any superuser role.
+            # _db_preflight has already refused any superuser role.
             cur.execute(sql.SQL("ALTER ROLE {} WITH LOGIN NOCREATEDB NOCREATEROLE "
                                 "PASSWORD {}").format(role, verifier))
             lines.append(f"role {ts.db_role}: password refreshed")
@@ -218,7 +228,7 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
         cur.execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(role, sql.Literal(ROLE_MARKER)))
         # The admin user must be able to SET ROLE to make it the database owner.
         cur.execute(sql.SQL("GRANT {} TO CURRENT_USER").format(role))
-        if _rows(cur, "SELECT 1 FROM pg_database WHERE datname = %s", (ts.db_name,)):
+        if db_exists:
             lines.append(f"database {ts.db_name}: exists")
         else:
             cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(db, role))
@@ -232,21 +242,32 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
 
 
 def isolation_check(ts: TestSiteSettings, cur) -> str:
-    """Fail unless the test role has no privilege on any production relation."""
+    """Fail unless the test role can reach nothing in the production database.
+
+    Two counts: relations it holds a privilege on directly, and roles it is a
+    member of (transitively; pg_has_role MEMBER also covers roles it could
+    only SET ROLE into, which NOINHERIT would hide from the first count).
+    """
     rows = _rows(cur, """
-        SELECT count(*) FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
-          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND n.nspname NOT LIKE 'pg_toast%%'
-          AND has_table_privilege(%s, c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')
-    """, (ts.db_role,))
-    count = rows[0][0] if rows else 0
-    if count:
+        SELECT
+          (SELECT count(*) FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND n.nspname NOT LIKE 'pg_toast%%'
+              AND has_table_privilege(%s, c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')),
+          (SELECT count(*) FROM pg_roles r
+            WHERE r.rolname NOT IN (%s, 'pg_database_owner')
+              AND pg_has_role(%s, r.oid, 'MEMBER'))
+    """, (ts.db_role, ts.db_role, ts.db_role))
+    tables, memberships = rows[0] if rows else (0, 0)
+    if tables or memberships:
         raise ValueError(
-            f"isolation check FAILED: role {ts.db_role} has privileges on {count} "
-            f"relation(s) in the production database. Fix before using the test site.")
-    return f"isolation: role {ts.db_role} has no privilege on any production relation"
+            f"isolation check FAILED: role {ts.db_role} has privileges on {tables} "
+            f"production relation(s) and is a member of {memberships} other role(s). "
+            f"Fix before using the test site.")
+    return (f"isolation: role {ts.db_role} has no privilege on any production relation "
+            f"and no role memberships")
 
 
 def database_url(ts: TestSiteSettings, secrets: dict) -> str:
@@ -262,7 +283,7 @@ def drop_database(ts: TestSiteSettings, _connect=None) -> list[str]:
     conn.autocommit = True
     try:
         cur = conn.cursor()
-        _assert_role_is_ours(ts, cur)  # never drop a role this tool did not make
+        _db_preflight(ts, cur)  # never drop a database or role this tool did not make
         cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
                     .format(sql.Identifier(ts.db_name)))
         cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ts.db_role)))
@@ -323,6 +344,51 @@ def _find_app(client, name: str) -> dict | None:
             return None
 
 
+MANAGED_TAG_KEY, MANAGED_TAG_VALUE = "managed-by", "aws-admin-testsite"
+
+
+def _assert_app_is_ours(app: dict) -> None:
+    """Refuse to update or delete an app this tool did not create.
+
+    Ours = tagged managed-by=aws-admin-testsite, or the app id recorded in the
+    local state when this tool created it. A configured production app id is
+    refused either way, even if it was renamed to the test name in AWS.
+    """
+    app_id = app["appId"]
+    if app_id in {ref.app_id for ref in config.known_apps()}:
+        raise ValueError(f"app {app_id} is a configured production app; refusing.")
+    tagged = (app.get("tags") or {}).get(MANAGED_TAG_KEY) == MANAGED_TAG_VALUE
+    if not tagged and app_id != _load_state().get("app_id"):
+        raise ValueError(
+            f"app '{app.get('name')}' ({app_id}) was not created by aws-admin testsite "
+            f"(no {MANAGED_TAG_KEY} tag); refusing to modify or delete it.")
+
+
+def _list_branches(client, app_id: str) -> list[dict]:
+    out, token = [], None
+    while True:
+        kwargs = {"appId": app_id, "maxResults": 50}
+        if token:
+            kwargs["nextToken"] = token
+        resp = client.list_branches(**kwargs)
+        out.extend(resp.get("branches", []))
+        token = resp.get("nextToken")
+        if not token:
+            return out
+
+
+def _assert_no_compute_roles(client, app_id: str) -> None:
+    """The test site must hold no AWS credentials at runtime: no app-level and
+    no branch-level compute role."""
+    if client.get_app(appId=app_id)["app"].get("computeRoleArn"):
+        raise ValueError("test app has a compute role attached; refusing (it must have none).")
+    with_role = [b["branchName"] for b in _list_branches(client, app_id)
+                 if b.get("computeRoleArn")]
+    if with_role:
+        raise ValueError(f"test branch(es) {', '.join(with_role)} have a compute role "
+                         f"attached; refusing (the test site must have none).")
+
+
 def _app_env(ts: TestSiteSettings, s: dict) -> dict:
     return {
         "AUTH_SECRET": s["auth_secret"],
@@ -353,20 +419,23 @@ def ensure_app(ts: TestSiteSettings, s: dict, github_token: str | None = None,
     )
     existing = _find_app(client, ts.app_name)
     if existing:
+        _assert_app_is_ours(existing)  # before any mutation
         app_id = existing["appId"]
         # update_app is a PUT: send every field we own; computeRoleArn stays unset on purpose.
         client.update_app(appId=app_id, **fields)
+        if (existing.get("tags") or {}).get(MANAGED_TAG_KEY) != MANAGED_TAG_VALUE:
+            client.tag_resource(resourceArn=existing["appArn"],
+                                tags={MANAGED_TAG_KEY: MANAGED_TAG_VALUE})
         action = "updated"
     else:
         if not github_token:
             raise ValueError("Creating the test app needs a GitHub token on stdin "
                              "(--github-token-stdin).")
-        app_id = client.create_app(repository=source["repository"],
-                                   accessToken=github_token, **fields)["app"]["appId"]
+        app_id = client.create_app(repository=source["repository"], accessToken=github_token,
+                                   tags={MANAGED_TAG_KEY: MANAGED_TAG_VALUE},
+                                   **fields)["app"]["appId"]
         action = "created"
-    app = client.get_app(appId=app_id)["app"]
-    if app.get("computeRoleArn"):
-        raise ValueError("test app has a compute role attached; refusing (it must have none).")
+    _assert_no_compute_roles(client, app_id)
     state = _load_state()
     state["app_id"] = app_id
     _save_state(state)
@@ -395,6 +464,7 @@ def branch(name: str, client=None) -> str:
     client = client or amplify_client()
     s = _load_secrets()
     app_id = _app_id()
+    _assert_no_compute_roles(client, app_id)
     creds = base64.b64encode(f"{BASIC_AUTH_USER}:{s['basic_password']}".encode()).decode()
     display = name.replace("/", "-")
     common = dict(framework="Next.js - SSR", stage="DEVELOPMENT", enableAutoBuild=False,
@@ -430,6 +500,7 @@ def deploy(name: str, wait: bool = True, client=None, timeout_s: int = 1800,
            poll_s: int = 20, _sleep=time.sleep) -> str:
     client = client or amplify_client()
     app_id = _app_id()
+    _assert_no_compute_roles(client, app_id)
     job = client.start_job(appId=app_id, branchName=name, jobType="RELEASE")["jobSummary"]
     job_id = job["jobId"]
     if not wait:
@@ -460,7 +531,11 @@ def status(client=None, _connect=None) -> str:
     lines = [f"app {app.get('name')} ({app_id}); compute role: "
              f"{'SET (unexpected)' if app.get('computeRoleArn') else 'none'}",
              "app env keys: " + ", ".join(sorted(app.get("environmentVariables", {})))]
+    branch_roles = {b["branchName"]: b.get("computeRoleArn")
+                    for b in _list_branches(client, app_id)}
     for name, display in sorted(state.get("branches", {}).items()):
+        if branch_roles.get(name):
+            lines.append(f"branch {name}: COMPUTE ROLE SET (unexpected)")
         jobs = client.list_jobs(appId=app_id, branchName=name, maxResults=1).get("jobSummaries", [])
         last = jobs[0]["status"] if jobs else "never built"
         lines.append(f"branch {name}: last job {last}; {_origin(app_id, display)}")
@@ -619,6 +694,7 @@ def down(yes: bool = False, client=None, _connect=None) -> str:
     lines = []
     app = _find_app(client, ts.app_name)
     if app:
+        _assert_app_is_ours(app)
         client.delete_app(appId=app["appId"])
         lines.append(f"app {ts.app_name} ({app['appId']}): deleted")
     else:
