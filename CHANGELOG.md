@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-08
+
+### Security
+- The isolation check also covers template databases that accept connections (such as `template1`).
+
+### Fixed
+- The `down` recovery message now says to run `DROP OWNED BY <role>;` in every database on the instance, not only the ones the role can still reach.
+- `docs/usage.md` describes the marker-based ownership rules.
+
 ## [0.11.2] - 2026-11-08
 
 ### Security
