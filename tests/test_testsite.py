@@ -193,7 +193,8 @@ def test_up_creates_role_db_and_app_without_leaking(with_testsite):
 
 
 def test_up_existing_app_updates_with_full_field_set(with_testsite):
-    connect, _ = _connect_factory([[(1,)], [(1,)], [(0,)]])
+    connect, _ = _connect_factory([[(1,)], [(ts.ROLE_MARKER, True, False)], [(0,)],
+                                   [(1,)], [(0,)]])
     amp = FakeAmp(existing=True)
     out = ts.up(client=amp, _connect=connect)
     name, kw = amp.calls[0]
@@ -206,6 +207,42 @@ def test_up_creating_app_without_token_fails(with_testsite):
     connect, _ = _connect_factory([[], [], [(0,)]])
     with pytest.raises(ValueError, match="GitHub token"):
         ts.up(client=FakeAmp(), _connect=connect)
+
+
+@pytest.mark.parametrize("role_row", [
+    (None, False, False),          # someone else's ordinary role
+    ("app role", False, False),    # commented, but not ours
+    (None, True, True),            # owns the test db but is powerful
+])
+def test_existing_foreign_role_is_refused_before_any_change(with_testsite, role_row):
+    connect, holder = _connect_factory([[(1,)], [role_row], [(0,)]])
+    with pytest.raises(ValueError, match="not created by aws-admin testsite"):
+        ts.up(github_token="t", client=FakeAmp(), _connect=connect)
+    executed = repr(holder["conn"].cur.executed)
+    assert "ALTER ROLE" not in executed and "GRANT" not in executed
+
+
+def test_existing_role_failing_isolation_is_refused_before_alter(with_testsite):
+    connect, holder = _connect_factory([[(1,)], [(ts.ROLE_MARKER, False, False)], [(5,)]])
+    with pytest.raises(ValueError, match="isolation check FAILED"):
+        ts.up(github_token="t", client=FakeAmp(), _connect=connect)
+    assert "ALTER ROLE" not in repr(holder["conn"].cur.executed)
+
+
+def test_failed_deploy_raises_and_cli_exits_nonzero(with_testsite, monkeypatch, capsys):
+    connect, _ = _connect_factory([[], [], [(0,)]])
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=connect)
+    amp.get_job = lambda **kw: {"job": {"summary": {"status": "FAILED"}}}
+    with pytest.raises(ts.CheckFailed, match="FAILED"):
+        ts.deploy("main", client=amp, _sleep=lambda s: None)
+
+    from aws_admin import cli
+    def boom(name, wait=True):
+        raise ts.CheckFailed("job 1 on main: FAILED")
+    monkeypatch.setattr(ts, "deploy", boom)
+    assert cli.main(["testsite", "deploy", "main"]) == 4
+    assert "FAILED" in capsys.readouterr().out
 
 
 def test_isolation_failure_raises(with_testsite):

@@ -157,9 +157,40 @@ def scram_sha256_verifier(password: str, salt: bytes | None = None,
     return f"SCRAM-SHA-256${iterations}:{b64(salt)}${b64(stored_key)}:{b64(server_key)}"
 
 
+ROLE_MARKER = "managed by aws-admin testsite"
+
+
+class CheckFailed(RuntimeError):
+    """A build or smoke check failed; the message is the full (value-free) report."""
+
+
 def _rows(cur, query, params=None):
     cur.execute(query, params)
     return cur.fetchall()
+
+
+def _assert_role_is_ours(ts: TestSiteSettings, cur) -> None:
+    """Refuse to touch an existing role unless this tool made it.
+
+    Ours = it carries ROLE_MARKER, or it owns the test database (roles created
+    before the marker existed). Either way it must also pass the isolation
+    check. This runs before any ALTER/DROP, so a misconfigured db_role that
+    names a production role is never modified.
+    """
+    rows = _rows(cur, """
+        SELECT shobj_description(r.oid, 'pg_authid'),
+               EXISTS (SELECT 1 FROM pg_database d WHERE d.datname = %s AND d.datdba = r.oid),
+               r.rolsuper OR r.rolcreaterole OR r.rolcreatedb
+        FROM pg_roles r WHERE r.rolname = %s
+    """, (ts.db_name, ts.db_role))
+    if not rows:
+        return
+    comment, owns_test_db, powerful = rows[0]
+    if powerful or not (comment == ROLE_MARKER or owns_test_db):
+        raise ValueError(
+            f"role {ts.db_role} exists but was not created by aws-admin testsite; "
+            f"refusing to modify it. Pick another db_role.")
+    isolation_check(ts, cur)
 
 
 def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[str]:
@@ -174,6 +205,7 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
         role, db = sql.Identifier(ts.db_role), sql.Identifier(ts.db_name)
         verifier = sql.Literal(scram_sha256_verifier(secrets["db_password"]))
         if _rows(cur, "SELECT 1 FROM pg_roles WHERE rolname = %s", (ts.db_role,)):
+            _assert_role_is_ours(ts, cur)  # before any mutation
             cur.execute(sql.SQL("ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB "
                                 "NOCREATEROLE PASSWORD {}").format(role, verifier))
             lines.append(f"role {ts.db_role}: password refreshed")
@@ -181,6 +213,7 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
             cur.execute(sql.SQL("CREATE ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB "
                                 "NOCREATEROLE NOINHERIT PASSWORD {}").format(role, verifier))
             lines.append(f"role {ts.db_role}: created")
+        cur.execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(role, sql.Literal(ROLE_MARKER)))
         # The admin user must be able to SET ROLE to make it the database owner.
         cur.execute(sql.SQL("GRANT {} TO CURRENT_USER").format(role))
         if _rows(cur, "SELECT 1 FROM pg_database WHERE datname = %s", (ts.db_name,)):
@@ -227,6 +260,7 @@ def drop_database(ts: TestSiteSettings, _connect=None) -> list[str]:
     conn.autocommit = True
     try:
         cur = conn.cursor()
+        _assert_role_is_ours(ts, cur)  # never drop a role this tool did not make
         cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
                     .format(sql.Identifier(ts.db_name)))
         cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ts.db_role)))
@@ -402,12 +436,15 @@ def deploy(name: str, wait: bool = True, client=None, timeout_s: int = 1800,
     status = job.get("status", "PENDING")
     while status in ("PENDING", "PROVISIONING", "RUNNING", "CANCELLING"):
         if time.monotonic() > deadline:
-            return f"job {job_id} on {name}: still {status} after {timeout_s}s"
+            raise CheckFailed(f"job {job_id} on {name}: still {status} after {timeout_s}s")
         _sleep(poll_s)
         status = client.get_job(appId=app_id, branchName=name,
                                 jobId=job_id)["job"]["summary"]["status"]
     display = _load_state().get("branches", {}).get(name, name.replace("/", "-"))
-    return f"job {job_id} on {name}: {status}\nurl: {_origin(app_id, display)}"
+    report = f"job {job_id} on {name}: {status}\nurl: {_origin(app_id, display)}"
+    if status != "SUCCEED":
+        raise CheckFailed(report)
+    return report
 
 
 def status(client=None, _connect=None) -> str:
@@ -500,7 +537,10 @@ def smoke(name: str, _opener_factory=None) -> str:
         check("csrf token", False, code)
 
     passed = sum(1 for ok, _ in results if ok)
-    return "\n".join([line for _, line in results] + [f"{passed}/{len(results)} passed"])
+    report = "\n".join([line for _, line in results] + [f"{passed}/{len(results)} passed"])
+    if passed != len(results):
+        raise CheckFailed(report)
+    return report
 
 
 def exec_with_db(argv: list[str], _run=None) -> int:

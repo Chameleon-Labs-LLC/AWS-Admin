@@ -217,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(ts_cmd.creds_to_file(args.to_file))
             elif args.action == "down":
                 print(ts_cmd.down(yes=args.yes))
+    except ts_cmd.CheckFailed as e:
+        print(str(e))
+        return 4
     except config.ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
