@@ -245,6 +245,18 @@ def test_failed_deploy_raises_and_cli_exits_nonzero(with_testsite, monkeypatch, 
     assert "FAILED" in capsys.readouterr().out
 
 
+def test_foreign_cookie_domain_detection():
+    from email.message import Message
+    h = Message()
+    h["Set-Cookie"] = "__Secure-next-auth.session-token=x; Domain=.chameleonlabs.ai; Path=/; Secure"
+    assert ts._foreign_cookie_domain(h, "main.d1.amplifyapp.com") == ".chameleonlabs.ai"
+    assert ts._foreign_cookie_domain(h, "www.chameleonlabs.ai") is None
+    h2 = Message()
+    h2["Set-Cookie"] = "other=1; Domain=.example.com"
+    assert ts._foreign_cookie_domain(h2, "main.d1.amplifyapp.com") is None
+    assert ts._foreign_cookie_domain(None, "x") is None
+
+
 def test_isolation_failure_raises(with_testsite):
     connect, _ = _connect_factory([[], [], [(3,)]])
     with pytest.raises(ValueError, match="isolation check FAILED"):
