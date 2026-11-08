@@ -166,6 +166,7 @@ def scram_sha256_verifier(password: str, salt: bytes | None = None,
 
 
 ROLE_MARKER = "managed by aws-admin testsite"
+DB_MARKER = ROLE_MARKER
 
 
 class CheckFailed(RuntimeError):
@@ -178,17 +179,17 @@ def _rows(cur, query, params=None):
     return cur.fetchall()
 
 
-def _db_preflight(ts: TestSiteSettings, cur, _connect=None,
-                  check_isolation: bool = True) -> tuple[bool, bool]:
+def _db_preflight(ts: TestSiteSettings, cur, _connect=None, check_isolation: bool = True,
+                  require_db_marker: bool = False) -> tuple[bool, bool]:
     """Decide, before any mutation, whether the role and database are ours.
 
     Returns (role_exists, db_exists). Refuses when:
-    * the database exists but is not owned by the managed role (it could be
-      anything else on the instance: never adopt or drop it);
-    * the role exists but is powerful, or carries neither the marker comment
-      nor ownership of the test database;
-    * an existing role fails the isolation check (skipped for `down`, which
-      only ever removes resources whose ownership was just verified).
+    * the role exists but lacks ROLE_MARKER, or is superuser/createrole/createdb;
+    * the database exists but is not owned by the managed role, or that role
+      is not marked (a database is never adopted on name or ownership alone);
+    * require_db_marker (teardown) and the database lacks DB_MARKER;
+    * check_isolation and an existing role fails the isolation check. Teardown
+      skips this so a failed check never blocks removing verified resources.
     """
     role_rows = _rows(cur, """
         SELECT shobj_description(r.oid, 'pg_authid'),
@@ -196,22 +197,29 @@ def _db_preflight(ts: TestSiteSettings, cur, _connect=None,
         FROM pg_roles r WHERE r.rolname = %s
     """, (ts.db_role,))
     db_rows = _rows(cur, """
-        SELECT pg_get_userbyid(d.datdba) FROM pg_database d WHERE d.datname = %s
+        SELECT pg_get_userbyid(d.datdba), shobj_description(d.oid, 'pg_database')
+        FROM pg_database d WHERE d.datname = %s
     """, (ts.db_name,))
     role_exists, db_exists = bool(role_rows), bool(db_rows)
-    owner = db_rows[0][0] if db_exists else None
-    if db_exists and owner != ts.db_role:
-        raise ValueError(
-            f"database {ts.db_name} exists but is not owned by {ts.db_role}; it was not "
-            f"created by aws-admin testsite. Refusing to adopt, alter or drop it.")
     if role_exists:
         comment, powerful = role_rows[0]
-        if powerful or not (comment == ROLE_MARKER or owner == ts.db_role):
+        if powerful or comment != ROLE_MARKER:
             raise ValueError(
-                f"role {ts.db_role} exists but was not created by aws-admin testsite; "
-                f"refusing to modify it. Pick another db_role.")
-        if check_isolation:
-            isolation_check(ts, cur, _connect=_connect)
+                f"role {ts.db_role} exists but was not created by aws-admin testsite "
+                f"(no marker, or it is privileged); refusing to modify it. Pick another db_role.")
+    if db_exists:
+        owner, db_comment = db_rows[0]
+        if owner != ts.db_role or not role_exists:
+            raise ValueError(
+                f"database {ts.db_name} exists but is not owned by the managed role "
+                f"{ts.db_role}; it was not created by aws-admin testsite. Refusing to adopt, "
+                f"alter or drop it.")
+        if require_db_marker and db_comment != DB_MARKER:
+            raise ValueError(
+                f"database {ts.db_name} has no aws-admin testsite marker; refusing to drop it. "
+                f"Run `aws-admin testsite up` once to mark it, or drop it by hand.")
+    if role_exists and check_isolation:
+        isolation_check(ts, cur, _connect=_connect)
     return role_exists, db_exists
 
 
@@ -245,6 +253,7 @@ def ensure_database(ts: TestSiteSettings, secrets: dict, _connect=None) -> list[
         else:
             cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(db, role))
             lines.append(f"database {ts.db_name}: created")
+        cur.execute(sql.SQL("COMMENT ON DATABASE {} IS {}").format(db, sql.Literal(DB_MARKER)))
         cur.execute(sql.SQL("REVOKE CONNECT, TEMPORARY ON DATABASE {} FROM PUBLIC").format(db))
         cur.execute(sql.SQL("GRANT CONNECT, TEMPORARY ON DATABASE {} TO {}").format(db, role))
         lines.append(isolation_check(ts, cur, _connect=_connect))
@@ -257,10 +266,15 @@ _OBJECT_PRIVILEGES_SQL = """
     SELECT
       (SELECT count(*) FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
           AND n.nspname NOT LIKE 'pg_toast%%'
-          AND has_table_privilege(%s, c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')),
+          AND CASE WHEN c.relkind = 'S'
+                THEN has_sequence_privilege(%s, c.oid, 'USAGE, SELECT, UPDATE')
+                ELSE has_table_privilege(%s, c.oid,
+                       'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+                     OR has_any_column_privilege(%s, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+              END),
       (SELECT count(*) FROM pg_namespace n
         WHERE n.nspname NOT LIKE 'pg_%%' AND n.nspname <> 'information_schema'
           AND has_schema_privilege(%s, n.oid, 'CREATE'))
@@ -273,8 +287,11 @@ def isolation_check(ts: TestSiteSettings, cur, _connect=None) -> str:
     Checks, effective through PUBLIC grants and role membership:
     * role memberships (pg_has_role MEMBER, transitive; also covers roles it
       could only SET ROLE into, which NOINHERIT would hide);
-    * in every other database on the instance the role can CONNECT to:
-      privileges on any relation, and CREATE on any schema.
+    * in every other database on the instance the role can CONNECT to: any
+      privilege on a table, view, materialized view, foreign table or sequence
+      (including column-level grants), and CREATE on any schema.
+    Not covered: function EXECUTE (Postgres grants it to PUBLIC by default),
+    large objects, and foreign servers.
     Bare CONNECT/TEMP (Postgres grants those to PUBLIC by default) is reported
     by name, not failed: with no object privileges and no CREATE it exposes
     only catalog metadata. Removing it means revoking PUBLIC's CONNECT on the
@@ -296,7 +313,7 @@ def isolation_check(ts: TestSiteSettings, cur, _connect=None) -> str:
     for dbname in reachable:
         conn = (_connect or connection.connect)(read_only=True, dbname=dbname)
         try:
-            counts = _rows(conn.cursor(), _OBJECT_PRIVILEGES_SQL, (ts.db_role, ts.db_role))
+            counts = _rows(conn.cursor(), _OBJECT_PRIVILEGES_SQL, (ts.db_role,) * 4)
         finally:
             conn.close()
         tables, schemas = counts[0] if counts else (0, 0)
@@ -320,6 +337,7 @@ def database_url(ts: TestSiteSettings, secrets: dict) -> str:
 
 def drop_database(ts: TestSiteSettings, _connect=None) -> list[str]:
     """Drop the test database and role, after verifying this tool owns both."""
+    import psycopg
     from psycopg import sql
 
     conn = (_connect or connection.connect)(read_only=False)
@@ -328,10 +346,18 @@ def drop_database(ts: TestSiteSettings, _connect=None) -> list[str]:
         cur = conn.cursor()
         # Never drop a database or role this tool did not make. Isolation is not
         # required here: a failed isolation check must not block removing our own role.
-        _db_preflight(ts, cur, check_isolation=False)
+        _db_preflight(ts, cur, check_isolation=False, require_db_marker=True)
         cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
                     .format(sql.Identifier(ts.db_name)))
-        cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ts.db_role)))
+        try:
+            cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(ts.db_role)))
+        except psycopg.Error as exc:
+            raise ValueError(
+                f"database {ts.db_name} was dropped, but DROP ROLE {ts.db_role} failed "
+                f"({type(exc).__name__}). The role still holds something in another "
+                f"database. In each database the isolation check lists, run "
+                f"`DROP OWNED BY {ts.db_role};` as the admin user, then run "
+                f"`aws-admin testsite down --yes` again.") from exc
     finally:
         conn.close()
     return [f"database {ts.db_name}: dropped", f"role {ts.db_role}: dropped"]
@@ -602,7 +628,10 @@ def status(client=None, _connect=None) -> str:
         if _rows(cur, "SELECT 1 FROM pg_roles WHERE rolname = %s", (ts.db_role,)):
             lines.append(isolation_check(ts, cur, _connect=_connect))
         else:
-            lines.append(f"role {ts.db_role}: MISSING (run `aws-admin testsite up`)")
+            advice = (f"The database still exists, so `up` will refuse it: check who owns "
+                      f"{ts.db_name} first." if exists
+                      else "Run `aws-admin testsite up` to recreate the role and database.")
+            lines.append(f"role {ts.db_role}: MISSING. {advice}")
     finally:
         conn.close()
     return "\n".join(lines)

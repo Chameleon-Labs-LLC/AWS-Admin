@@ -138,7 +138,8 @@ class ScriptedConn:
 # An isolation row is (role memberships, [other databases the role can CONNECT to]).
 CLEAN = [(0, [])]
 FRESH = [[], [], CLEAN]
-OURS = [[(ts.ROLE_MARKER, False)], [("example_test_role",)], CLEAN, CLEAN]
+OWNED_DB = [("example_test_role", ts.DB_MARKER)]
+OURS = [[(ts.ROLE_MARKER, False)], OWNED_DB, CLEAN, CLEAN]
 
 
 def _connect_factory(results, per_db=None):
@@ -240,7 +241,8 @@ def test_up_creating_app_without_token_fails(with_testsite):
 @pytest.mark.parametrize("role_row,db_rows", [
     ((None, False), []),                                    # someone else's role, no db
     (("app role", False), []),                              # commented, but not ours
-    ((ts.ROLE_MARKER, True), [("example_test_role",)]),     # ours by marker, but powerful
+    ((ts.ROLE_MARKER, True), [("example_test_role", ts.DB_MARKER)]),  # marked, but powerful
+    ((None, False), [("example_test_role", None)]),         # owns the db but has no marker
 ])
 def test_existing_foreign_role_is_refused_before_any_change(with_testsite, role_row, db_rows):
     connect, holder = _connect_factory([[role_row], db_rows, CLEAN])
@@ -251,12 +253,12 @@ def test_existing_foreign_role_is_refused_before_any_change(with_testsite, role_
 
 
 def test_existing_database_not_owned_by_role_is_refused(with_testsite):
-    connect, holder = _connect_factory([[], [("postgres",)]])
+    connect, holder = _connect_factory([[], [("postgres", None)]])
     with pytest.raises(ValueError, match="not owned by"):
         ts.up(github_token="t", client=FakeAmp(), _connect=connect)
     assert "CREATE ROLE" not in repr(holder["conn"].cur.executed)
 
-    connect2, holder2 = _connect_factory([[], [("postgres",)]])
+    connect2, holder2 = _connect_factory([[], [("postgres", None)]])
     with pytest.raises(ValueError, match="not owned by"):
         ts.drop_database(ts.settings(), _connect=connect2)
     assert "DROP" not in repr(holder2["conn"].cur.executed)
@@ -297,8 +299,7 @@ def test_down_still_removes_owned_resources_when_isolation_fails(with_testsite):
     amp = FakeAmp()
     ts.up(github_token="t", client=amp, _connect=_fresh())
     # ours by marker + ownership; isolation would fail, but down must not depend on it
-    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)], [("example_test_role",)],
-                                        [(3, [])]])
+    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)], OWNED_DB, [(3, [])]])
     ts.down(yes=True, client=amp, _connect=connect)
     executed = repr(holder["conn"].cur.executed)
     assert "DROP DATABASE" in executed and "DROP ROLE" in executed
@@ -452,10 +453,11 @@ def test_cli_exec_strips_double_dash(with_testsite, monkeypatch):
 def test_status_reports_missing_role_instead_of_failing(with_testsite):
     amp = FakeAmp()
     ts.up(github_token="t", client=amp, _connect=_fresh())
-    # database exists, role gone (removed outside the tool)
+    # database exists, role gone (removed outside the tool): do not advise `up`
     connect, holder = _connect_factory([[(1,)], []])
     out = ts.status(client=amp, _connect=connect)
     assert "role example_test_role: MISSING" in out and "database example_db_test: exists" in out
+    assert "check who owns" in out and "testsite up` to recreate" not in out
     assert "pg_has_role" not in repr(holder["conn"].cur.executed)
 
 
@@ -464,6 +466,55 @@ def test_status_runs_isolation_when_role_exists(with_testsite):
     ts.up(github_token="t", client=amp, _connect=_fresh())
     connect, _ = _connect_factory([[(1,)], [(1,)], CLEAN])
     assert "isolation: role example_test_role" in ts.status(client=amp, _connect=connect)
+
+
+def test_status_missing_role_and_database_advises_up(with_testsite):
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=_fresh())
+    connect, _ = _connect_factory([[], []])
+    out = ts.status(client=amp, _connect=connect)
+    assert "database example_db_test: MISSING" in out and "testsite up` to recreate" in out
+
+
+def test_isolation_sql_covers_sequences_and_column_grants():
+    sql = ts._OBJECT_PRIVILEGES_SQL
+    assert "'S'" in sql and "has_sequence_privilege" in sql
+    assert "has_any_column_privilege" in sql and "REFERENCES" in sql
+
+
+def test_up_marks_the_database(with_testsite):
+    connect, holder = _connect_factory(FRESH)
+    ts.up(github_token="t", client=FakeAmp(), _connect=connect)
+    assert "COMMENT ON DATABASE" in repr(holder["conn"].cur.executed)
+
+
+def test_down_refuses_unmarked_database(with_testsite):
+    amp = FakeAmp()
+    ts.up(github_token="t", client=amp, _connect=_fresh())
+    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)],
+                                        [("example_test_role", None)]])
+    with pytest.raises(ValueError, match="no aws-admin testsite marker"):
+        ts.drop_database(ts.settings(), _connect=connect)
+    assert "DROP" not in repr(holder["conn"].cur.executed)
+
+
+def test_down_explains_drop_role_failure(with_testsite):
+    import psycopg
+    connect, holder = _connect_factory([[(ts.ROLE_MARKER, False)], OWNED_DB])
+
+    def connect_failing(read_only=True, dbname=None):
+        conn = connect(read_only=read_only, dbname=dbname)
+        real = conn.cur.execute
+
+        def execute(query, params=None):
+            real(query, params)
+            if "DROP ROLE" in repr(query):
+                raise psycopg.errors.DependentObjectsStillExist("role has dependents")
+        conn.cur.execute = execute
+        return conn
+
+    with pytest.raises(ValueError, match="DROP OWNED BY example_test_role"):
+        ts.drop_database(ts.settings(), _connect=connect_failing)
 
 
 # --- teardown ---
@@ -476,8 +527,7 @@ def test_down_requires_yes(with_testsite):
 def test_down_deletes_app_db_and_state(with_testsite):
     amp = FakeAmp()
     ts.up(github_token="t", client=amp, _connect=_fresh())
-    connect2, holder2 = _connect_factory([[(ts.ROLE_MARKER, False)],
-                                          [("example_test_role",)]])
+    connect2, holder2 = _connect_factory([[(ts.ROLE_MARKER, False)], OWNED_DB])
     out = ts.down(yes=True, client=amp, _connect=connect2)
     assert ("delete_app", {"appId": "dtest"}) in amp.calls
     assert "DROP DATABASE" in repr(holder2["conn"].cur.executed)

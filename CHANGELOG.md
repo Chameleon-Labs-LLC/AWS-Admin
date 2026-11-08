@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.11.1] - 2026-11-08
 
 ### Security
-- `testsite` touches nothing it did not create. Before any change it verifies that the app is tagged `managed-by=aws-admin-testsite` (and is never a configured production app id), that the database is owned by the managed role, and that the role carries the tool's marker and is not superuser, createrole or createdb.
-- The isolation check now covers role memberships (including `SET ROLE` targets) and every database the role can reach through `PUBLIC`, failing on any relation privilege or schema `CREATE`.
+- `testsite` verifies ownership before changing anything: the app must be tagged `managed-by=aws-admin-testsite` (or be the app id recorded locally when the tool created it) and must not be a configured production app id; the database must be owned by the managed role. (0.11.1 still adopted a role that owned the test database without carrying the tool's marker; 0.11.2 requires the marker on the role and on the database.)
+- The isolation check now covers role memberships (including `SET ROLE` targets) and every database the role can reach through `PUBLIC`, failing on table-level privileges and schema `CREATE`. (0.11.1 did not check sequences or column-level grants; 0.11.2 does.)
 - Compute roles are refused at branch level as well as app level.
 
 ### Fixed
@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ALTER ROLE` no longer sets `NOSUPERUSER`, which the RDS admin user cannot change.
 - `smoke` reports signed-in checks as SKIP, with the reason, when the app pins its session cookie to a domain the test host cannot hold.
 - `status` reports a missing role instead of failing.
-- `teardown` (`down`) is no longer blocked by a failed isolation check, so a verified test site can always be removed.
+- `down` is no longer blocked by a failed isolation check. `DROP ROLE` can still fail if the role holds something in another database; the database is already gone by then (see 0.11.2 for the recovery message).
 
 ### Changed
 - Docstrings on every `testsite` function. `docs/usage.md` gains a "Test site" section.
