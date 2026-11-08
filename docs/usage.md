@@ -329,7 +329,12 @@ What keeps it isolated:
 - **Separate database:** `CONNECT` on it is revoked from `PUBLIC`. Every `up`
   and `status` checks that the role has no role memberships, and no privilege on
   any table, view, sequence or column and no schema `CREATE` in any other
-  database that accepts connections (templates included). An existing role is
+  database that accepts connections and that the role can `CONNECT` to
+  (templates included). This is an isolation check, not a full privilege
+  audit: it does not look inside databases the role cannot connect to (grants
+  there become usable if `CONNECT` is granted later), system schemas, function
+  `EXECUTE` (granted to `PUBLIC` by default), large objects, or foreign
+  servers. An existing role is
   only changed if it carries this tool's marker comment; a database is only
   adopted if that role owns it, and `down` only drops a database that carries
   the marker too.

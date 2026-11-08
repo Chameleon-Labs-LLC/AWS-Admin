@@ -20,10 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - Ownership is now proven by markers, not inferred. A role is touched only if it carries the `aws-admin testsite` marker comment and is not superuser, createrole or createdb. A database is adopted only if the marked role owns it, and `down` drops it only if the database carries its own marker (set by `up`).
-- The isolation check also catches sequence privileges and column-level grants (`has_sequence_privilege`, `has_any_column_privilege`) in every database the role can reach (every database that accepts connections, templates such as `template1` included), alongside table privileges, schema `CREATE` and role memberships. Not covered, by design: function `EXECUTE` (granted to `PUBLIC` by Postgres), large objects, foreign servers.
+- The isolation check also catches sequence privileges and column-level grants (`has_sequence_privilege`, `has_any_column_privilege`) in every non-template database the role can reach, alongside table privileges, schema `CREATE` and role memberships. (0.11.2 skipped template databases such as `template1`; 0.11.3 checks them.) Not covered, by design: function `EXECUTE` (granted to `PUBLIC` by Postgres), large objects, foreign servers.
 
 ### Fixed
-- `down`: if `DROP ROLE` fails after the database has been dropped, the error names the cause and the recovery: `DROP OWNED BY <role>;` in every database on the instance, including ones the role can no longer connect to, then `down --yes` again.
+- `down`: if `DROP ROLE` fails after the database has been dropped, the error names the cause and a recovery: `DROP OWNED BY <role>;` in each database the isolation check lists, then `down --yes` again. (That list misses databases the role can no longer connect to; 0.11.3's message covers every database on the instance.)
 - `status`: when the role is missing but the database still exists, it says to check the database's owner instead of suggesting `up`, which would refuse it.
 - CHANGELOG 0.11.1 entries now state what that release did and did not cover.
 
