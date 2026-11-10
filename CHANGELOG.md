@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-11-09
+
+### Added
+- MIT `LICENSE` file.
+- `security` workflow: gitleaks over the commits each PR or push introduces (full history on a weekly timer) and osv-scanner over every manifest, lockfile and pinned workflow action. Both scanners are installed from checksum-verified release binaries, downloaded outside the checkout.
+- The osv-scanner job also scans the `pyproject.toml` dependencies, which osv-scanner does not read on its own. The extraction runs in isolated mode so files in the checkout cannot change it.
+- Dependabot for pip and GitHub Actions. pip security updates are grouped into one PR; version updates for both wait out a 7-day cooldown. SHA-pinned actions get no Dependabot alerts, so a vulnerable action is reported by osv-scanner and fixed through the weekly version update.
+
 ## [0.11.4] - 2026-11-08
 
 ### Security
