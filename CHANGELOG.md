@@ -7,15 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- `env copy KEY [KEY...] --from <app> --to <app>`: copies env-var values from one app's encrypted local snapshot to another's, so a key one app already has (an AI provider key, for example) can be installed on another app without anyone seeing or typing it. No AWS call; run `env push <to>` afterwards as usual.
-  - Output is key and app names only: never a value, its length, or a hash.
-  - Refuses, writing nothing, when the two apps are the same, either snapshot is missing, a key is missing or blank in the source, or a source key has different app- and branch-level values.
-  - A destination key that already holds a different value is replaced only with `--overwrite`; without it the copy is refused and those keys are named. Same-value keys are reported as unchanged.
-  - `--rename SRC=DST` stores a key under another name in the destination.
-  - The destination snapshot is backed up before the write; the source is never modified.
-- `/aws-env-copy` slash command.
-
 ## [0.11.5] - 2026-11-09
 
 ### Added
