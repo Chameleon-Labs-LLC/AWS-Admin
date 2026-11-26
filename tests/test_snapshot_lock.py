@@ -56,3 +56,23 @@ def test_write_is_atomic_and_private():
     assert not list(path.parent.glob(".*.tmp")), "no temp file left behind"
     _seed("MyApp2", {"A": "2"})
     assert vault.load_snapshot("MyApp2")["app_level"] == {"A": "2"}
+
+
+def test_busy_is_a_vault_error_so_the_cli_reports_one_line():
+    assert issubclass(vault.SnapshotBusy, vault.VaultError)
+
+
+def test_cli_reports_busy_as_one_line_error(capsys):
+    from aws_admin import cli
+    _seed("MyApp2", {"K": "old"})
+    with vault.snapshot_lock("MyApp2"):
+        code = cli.main(["env", "copy", "K", "--from", "aa", "--to", "my"])
+    err = capsys.readouterr().err
+    assert code == 1 and "Traceback" not in err and "MyApp2" in err
+
+
+def test_two_backups_in_the_same_second_do_not_overwrite_each_other():
+    snap = {"app_level": {"A": "1"}, "branch_level": {}}
+    first = vault.backup_snapshot("MyApp2", snap)
+    second = vault.backup_snapshot("MyApp2", {"app_level": {"A": "2"}, "branch_level": {}})
+    assert first != second and first.exists() and second.exists()

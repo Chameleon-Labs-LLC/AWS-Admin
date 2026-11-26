@@ -28,8 +28,12 @@ class VaultError(RuntimeError):
     """Raised when the vault cannot be read (corrupt data or wrong key)."""
 
 
-class SnapshotBusy(RuntimeError):
-    """Another aws-admin command holds the lock on this app's snapshot."""
+class SnapshotBusy(VaultError):
+    """Another aws-admin command holds the lock on this app's snapshot.
+
+    A VaultError, so the CLI reports it as a one-line error (exit 1) and
+    `env pull all` moves on to the next app.
+    """
 
 
 def _write_private(path: Path, data: bytes) -> None:
@@ -122,7 +126,8 @@ def save_snapshot(app_name: str, data: dict) -> None:
 
 
 def backup_snapshot(app_name: str, data: dict) -> Path:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    # Microseconds: two backups of one app in the same second must not share a path.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     path = config.backup_path(app_name, ts)
     _write_private(path, encrypt(data))
     return path
