@@ -131,3 +131,56 @@ def test_rotate_help_advertises_all(capsys):
     with pytest.raises(SystemExit):
         cli.main(["env", "rotate", "-h"])
     assert "for every configured app" in _flatten(capsys.readouterr().out)
+
+
+def test_parse_env_copy():
+    args = cli.build_parser().parse_args(
+        ["env", "copy", "A", "B", "--from", "cl", "--to", "st",
+         "--rename", "A=X", "--rename", "B=Y", "--overwrite"]
+    )
+    assert args.action == "copy"
+    assert args.keys == ["A", "B"]
+    assert args.from_app == "cl"
+    assert args.to_app == "st"
+    assert args.rename == ["A=X", "B=Y"]
+    assert args.overwrite is True
+
+
+def test_parse_env_copy_defaults():
+    args = cli.build_parser().parse_args(["env", "copy", "A", "--from", "cl", "--to", "st"])
+    assert args.rename == []
+    assert args.overwrite is False
+
+
+@pytest.mark.parametrize("argv", [
+    ["env", "copy", "A", "--to", "st"],             # no --from
+    ["env", "copy", "A", "--from", "cl"],           # no --to
+    ["env", "copy", "--from", "cl", "--to", "st"],  # no key
+])
+def test_parse_env_copy_requires_keys_from_and_to(argv):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(argv)
+
+
+def test_copy_dispatch_calls_command(monkeypatch, capsys):
+    seen = {}
+
+    def fake_copy(keys, from_token, to_token, *, renames, overwrite):
+        seen.update(keys=keys, src=from_token, dst=to_token,
+                    renames=renames, overwrite=overwrite)
+        return "COPIED-OK"
+
+    monkeypatch.setattr(_env, "copy", fake_copy)
+    rc = cli.main(["env", "copy", "K", "--from", "aa", "--to", "my", "--rename", "K=J"])
+    assert rc == 0
+    assert seen == {"keys": ["K"], "src": "aa", "dst": "my",
+                    "renames": ["K=J"], "overwrite": False}
+    assert "COPIED-OK" in capsys.readouterr().out
+
+
+def test_copy_help_does_not_advertise_all(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["env", "copy", "-h"])
+    text = _flatten(capsys.readouterr().out)
+    assert "--overwrite" in text and "--rename" in text
+    assert "for every configured app" not in text.split("Known apps")[0]

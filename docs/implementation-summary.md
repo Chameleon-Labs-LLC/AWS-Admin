@@ -27,7 +27,7 @@ aws-admin env push <app>                      # DRY-RUN (key-only diff) by defau
 aws-admin env push <app> --apply [--redeploy] # send full set (REPLACE-not-merge) + optional redeploy
 aws-admin env redeploy <app>                  # start a RELEASE job
 ```
-Global slash commands: `/aws-env-pull|diff|push|edit` (in `~/.claude/commands/`, reference copies in `slash-commands/`).
+Global slash commands: `/aws-env-pull|diff|push|edit|copy` (in `~/.claude/commands/`, reference copies in `slash-commands/`).
 
 ## Security properties (regression-tested)
 - Secret values never appear in any command output — `tests/test_no_value_leak.py` drives the real command paths and asserts the secret never surfaces; vault files on disk are opaque Fernet ciphertext.
