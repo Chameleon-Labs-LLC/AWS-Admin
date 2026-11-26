@@ -1,6 +1,7 @@
 """Amplify env-var commands. Values never appear in any return value or print."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from botocore.exceptions import ClientError
@@ -29,6 +30,11 @@ def _fetch_remote(client, app_id: str, branch: str) -> tuple[dict, dict]:
 
 def pull(app_token: str, client=None) -> str:
     ref = config.resolve_app(app_token)
+    with vault.snapshot_lock(ref.name):
+        return _pull_locked(ref, client)
+
+
+def _pull_locked(ref, client) -> str:
     client = _client(client)
     app_env, branch_env = _fetch_remote(client, ref.app_id, config.DEFAULT_BRANCH)
 
@@ -154,6 +160,13 @@ def _format_rotate_summary(name, rotated, added, skipped, unchanged) -> str:
 
 
 def rotate(name: str, app_tokens: list[str], *, confirm=None, open_editor=None) -> str:
+    """Locked entry point; see _rotate_locked."""
+    names = [ref.name for ref in config.resolve_apps(app_tokens)]
+    with vault.snapshot_lock(*names):
+        return _rotate_locked(name, app_tokens, confirm=confirm, open_editor=open_editor)
+
+
+def _rotate_locked(name: str, app_tokens: list[str], *, confirm=None, open_editor=None) -> str:
     """Set `name` to a new value across the given apps' LOCAL snapshots. No AWS.
 
     Enter the value once in the editor; it is written to every level (app and/or
@@ -230,3 +243,172 @@ def rotate(name: str, app_tokens: list[str], *, confirm=None, open_editor=None) 
             rotated.append((ref.name, levels))
 
     return _format_rotate_summary(name, rotated, newly_added, skipped, unchanged)
+
+
+# Amplify env-var names: letters, digits and underscores, not starting with a digit.
+_KEY_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _parse_renames(keys: list[str], renames: list[str]) -> dict[str, str]:
+    """Map each source key to its destination key. Raises ValueError (names only)."""
+    mapping = {k: k for k in keys}
+    renamed: set[str] = set()
+    for spec in renames:
+        if spec.count("=") != 1:
+            raise ValueError(f"--rename expects SRC=DST, got '{spec}'.")
+        src, dst = (part.strip() for part in spec.split("=", 1))
+        if not src or not dst:
+            raise ValueError(f"--rename expects SRC=DST, got '{spec}'.")
+        if src not in mapping:
+            raise ValueError(
+                f"--rename {src}={dst}: {src} is not one of the keys being copied."
+            )
+        if src in renamed:
+            raise ValueError(f"--rename given twice for {src}.")
+        if not _KEY_NAME.match(dst):
+            raise ValueError(
+                f"--rename {src}={dst}: '{dst}' is not a valid env-var name "
+                f"(letters, digits, underscores; not starting with a digit)."
+            )
+        mapping[src] = dst
+        renamed.add(src)
+    seen: dict[str, str] = {}
+    for src, dst in mapping.items():
+        if dst in seen:
+            raise ValueError(
+                f"{seen[dst]} and {src} would both be copied to {dst}. "
+                f"Pick distinct destination names."
+            )
+        seen[dst] = src
+    return mapping
+
+
+def _source_value(snap: dict, key: str, app_name: str) -> str:
+    """The value `key` has in a source snapshot: branch-level wins (as in Amplify).
+
+    Raises ValueError, naming the key only, when the key is blank or set to two
+    different values at app- and branch-level. The caller checks presence first.
+    """
+    in_app = key in snap["app_level"]
+    in_branch = key in snap["branch_level"]
+    if in_app and in_branch and snap["app_level"][key] != snap["branch_level"][key]:
+        raise ValueError(
+            f"{key} has different app-level and branch-level values in {app_name}; "
+            f"resolve that with 'aws-admin env edit' before copying. No changes made."
+        )
+    value = snap["branch_level"][key] if in_branch else snap["app_level"][key]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{key} has no usable value in the {app_name} snapshot. No changes made."
+        )
+    return value
+
+
+def _format_copy_summary(src_name, dst_name, written, unchanged) -> str:
+    """Key/app-only summary. `written` is a list of (src, dst, levels, added)."""
+    lines = [f"Copied {len(written)} key(s) from {src_name} to {dst_name} "
+             f"(local snapshot only, nothing sent to AWS):"]
+    for src, dst, levels, added in written:
+        target = dst if src == dst else f"{src} -> {dst}"
+        phrase = " + ".join(_LEVEL_LABEL[lvl] for lvl in levels)
+        lines.append(f"  {target}: {'added' if added else 'replaced'} ({phrase})")
+    if not written:
+        lines.append("  (none)")
+    lines.append(f"Unchanged (same value): {', '.join(unchanged) if unchanged else '(none)'}")
+    if written:
+        lines.append("")
+        lines.append(f"Next: aws-admin env push {dst_name}   (dry run, key-only diff), "
+                     f"then add --apply --redeploy.")
+    return "\n".join(lines)
+
+
+def copy(keys: list[str], from_token: str, to_token: str, *,
+         renames: list[str] | None = None, overwrite: bool = False) -> str:
+    """Copy env-var values from one app's LOCAL snapshot to another's. No AWS.
+
+    Values move between the two encrypted snapshots in memory and are never
+    returned, printed or measured. Every check runs before any write, so a
+    refusal changes nothing:
+
+    - the two apps must differ, and both must have been pulled;
+    - every key must be in the source snapshot with a usable value;
+    - a destination key that already holds a DIFFERENT value is replaced only
+      with ``overwrite=True``; otherwise the copy is refused and those keys
+      are named.
+
+    A destination key is written at every level where it already lives, or at
+    app-level when it is new. The destination snapshot is backed up first.
+    Run ``env push <to>`` afterward to send the change to Amplify.
+    """
+    for token in (from_token, to_token):
+        if token.strip().lower() == "all":
+            raise ValueError("copy takes one source app and one destination app; "
+                             "'all' is not supported.")
+    src_ref = config.resolve_app(from_token)
+    dst_ref = config.resolve_app(to_token)
+    if src_ref.name == dst_ref.name:
+        raise ValueError(
+            f"--from and --to are the same app ({src_ref.name}); nothing to copy."
+        )
+
+    keys = list(dict.fromkeys(k.strip() for k in keys))
+    if not keys or not all(keys):
+        raise ValueError("Name at least one key to copy.")
+    mapping = _parse_renames(keys, list(renames or []))
+
+    # The destination is read, checked and written under its lock, so two
+    # copies (or a copy and an edit) can't both pass the overwrite check.
+    with vault.snapshot_lock(dst_ref.name):
+        return _copy_locked(keys, src_ref, dst_ref, mapping, overwrite)
+
+
+def _copy_locked(keys, src_ref, dst_ref, mapping, overwrite) -> str:
+    # Load both snapshots up front; fail fast if either app was never pulled.
+    src_snap = vault.load_snapshot(src_ref.name)
+    dst_snap = vault.load_snapshot(dst_ref.name)
+    missing_snapshot = [ref.name for ref, snap in ((src_ref, src_snap), (dst_ref, dst_snap))
+                        if snap is None]
+    if src_snap is None or dst_snap is None:
+        raise FileNotFoundError(
+            f"No local snapshot for: {', '.join(missing_snapshot)}. "
+            f"Run 'aws-admin env pull <app>' first."
+        )
+
+    missing_keys = [k for k in keys
+                    if k not in src_snap["app_level"] and k not in src_snap["branch_level"]]
+    if missing_keys:
+        raise ValueError(
+            f"Not in the {src_ref.name} snapshot: {', '.join(missing_keys)}. "
+            f"No changes made. (Pull {src_ref.name} again if the key was added recently.)"
+        )
+    values = {k: _source_value(src_snap, k, src_ref.name) for k in keys}
+
+    # Plan each destination key: (src, dst, levels, added); same value = unchanged.
+    plan: list[tuple[str, str, list[str], bool]] = []
+    unchanged: list[str] = []
+    conflicts: list[str] = []
+    for src in keys:
+        dst = mapping[src]
+        levels = [lvl for lvl in ("app_level", "branch_level") if dst in dst_snap[lvl]]
+        if not levels:
+            plan.append((src, dst, ["app_level"], True))
+        elif all(dst_snap[lvl][dst] == values[src] for lvl in levels):
+            unchanged.append(dst)
+        else:
+            conflicts.append(dst)
+            plan.append((src, dst, levels, False))
+
+    if conflicts and not overwrite:
+        raise ValueError(
+            f"{dst_ref.name} already has a different value for: {', '.join(conflicts)}. "
+            f"Re-run with --overwrite to replace them. No changes made."
+        )
+
+    if plan:
+        vault.backup_snapshot(dst_ref.name, dst_snap)
+        for src, dst, levels, _added in plan:
+            for lvl in levels:
+                dst_snap[lvl][dst] = values[src]
+        vault.save_snapshot(dst_ref.name, dst_snap)
+
+    return _format_copy_summary(src_ref.name, dst_ref.name, plan, unchanged)

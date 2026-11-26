@@ -100,6 +100,28 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"One or more app tokens (space-separated), or 'all'. {app_help_all}",
     )
 
+    copy_p = actions.add_parser(
+        "copy",
+        help="Copy keys from one app's local snapshot to another's (no AWS; push after)",
+        description=(
+            "Copy env-var values between two apps' encrypted local snapshots. "
+            "Nothing is sent to AWS and no value is ever printed: run "
+            "'env push <to>' afterwards to review and apply."
+        ),
+        epilog=apps_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    copy_p.add_argument("keys", nargs="+", metavar="KEY",
+                        help="Env-var key(s) to copy, e.g. ANTHROPIC_API_KEY")
+    copy_p.add_argument("--from", dest="from_app", required=True, metavar="APP",
+                        help=f"Source app. {app_help}")
+    copy_p.add_argument("--to", dest="to_app", required=True, metavar="APP",
+                        help=f"Destination app. {app_help}")
+    copy_p.add_argument("--rename", action="append", default=[], metavar="SRC=DST",
+                        help="Store SRC under the name DST in the destination (repeatable)")
+    copy_p.add_argument("--overwrite", action="store_true",
+                        help="Replace destination keys that already hold a different value")
+
     db_p = groups.add_parser("db", help="PostgreSQL admin")
     db_actions = db_p.add_subparsers(dest="action", required=True)
     db_actions.add_parser("set-password", help="Store the DB password (hidden prompt)")
@@ -183,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.action == "rotate":
                 print(env_cmd.rotate(args.name, args.apps))
+            elif args.action == "copy":
+                print(env_cmd.copy(args.keys, args.from_app, args.to_app,
+                                   renames=args.rename, overwrite=args.overwrite))
         elif args.group == "db":
             if args.action == "set-password":
                 db_cmd.set_password()

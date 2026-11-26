@@ -6,6 +6,7 @@ transient edit buffer (see edit_app_buffer), which is shredded.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -17,20 +18,74 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from . import config
 
+try:  # POSIX only; aws-admin runs in WSL. Without it the lock is advisory-free.
+    import fcntl
+except ImportError:  # pragma: no cover - native Windows
+    fcntl = None  # type: ignore[assignment]
+
 
 class VaultError(RuntimeError):
     """Raised when the vault cannot be read (corrupt data or wrong key)."""
 
 
+class SnapshotBusy(VaultError):
+    """Another aws-admin command holds the lock on this app's snapshot.
+
+    A VaultError, so the CLI reports it as a one-line error (exit 1) and
+    `env pull all` moves on to the next app.
+    """
+
+
 def _write_private(path: Path, data: bytes) -> None:
-    """Write bytes to `path` created with mode 0600 from the start (no world-readable window)."""
+    """Write bytes to `path` with mode 0600 from the start (no world-readable window).
+
+    Written to a sibling temp file and renamed into place, so a concurrent
+    reader sees the old file or the new one, never a truncated one.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
+        os.fchmod(fd, 0o600) if hasattr(os, "fchmod") else None
         os.write(fd, data)
-    finally:
+        os.fsync(fd)
+    except BaseException:
         os.close(fd)
-    path.chmod(0o600)  # also fix perms if the file pre-existed with looser mode
+        os.unlink(tmp)
+        raise
+    os.close(fd)
+    os.replace(tmp, path)
+    path.chmod(0o600)
+
+
+@contextlib.contextmanager
+def snapshot_lock(*app_names: str):
+    """Hold an exclusive lock on each app's snapshot for a read-change-write.
+
+    Every command that loads a snapshot, changes it and saves it back (pull,
+    edit, rotate, copy) runs inside this, so two of them can't both read the
+    same snapshot and have the second silently undo the first. A second
+    command is refused at once (SnapshotBusy) rather than left waiting.
+    Locks are taken in name order, so two multi-app commands can't deadlock.
+    """
+    fds: list[int] = []
+    try:
+        for name in sorted(set(app_names)):
+            vault = config.vault_path(name)
+            vault.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(vault.with_name(vault.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            fds.append(fd)
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise SnapshotBusy(
+                        f"Another aws-admin command is changing the {name} snapshot. "
+                        f"Try again when it finishes. No changes made."
+                    ) from None
+        yield
+    finally:
+        for fd in fds:
+            os.close(fd)  # closing the descriptor releases its flock
 
 
 def ensure_key() -> bytes:
@@ -71,7 +126,8 @@ def save_snapshot(app_name: str, data: dict) -> None:
 
 
 def backup_snapshot(app_name: str, data: dict) -> Path:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    # Microseconds: two backups of one app in the same second must not share a path.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     path = config.backup_path(app_name, ts)
     _write_private(path, encrypt(data))
     return path
@@ -202,8 +258,13 @@ def capture_value(key: str, target_names: list[str], _open_editor=_default_open_
 def edit_app_buffer(app_name: str, _open_editor=_default_open_editor) -> bool:
     """Open the decrypted snapshot in $EDITOR; re-encrypt and shred on save.
 
-    Returns True if values changed.
+    Returns True if values changed. Holds the snapshot lock throughout.
     """
+    with snapshot_lock(app_name):
+        return _edit_app_buffer_locked(app_name, _open_editor)
+
+
+def _edit_app_buffer_locked(app_name: str, _open_editor) -> bool:
     snap = load_snapshot(app_name)
     if snap is None:
         raise FileNotFoundError(

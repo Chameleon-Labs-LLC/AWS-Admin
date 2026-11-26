@@ -49,7 +49,14 @@ aws-admin env push shop        # dry-run: key-only diff of what would change (ch
 aws-admin env push shop --apply --redeploy   # actually apply + redeploy
 aws-admin env diff shop        # compare local snapshot vs live
 aws-admin env redeploy shop    # start a RELEASE job (rebuild/redeploy)
+aws-admin env rotate API_SECRET shop blog   # one new value into several snapshots
+aws-admin env copy API_KEY --from shop --to blog   # copy a value between snapshots (no AWS, value never shown)
 ```
+
+`rotate` and `copy` change local snapshots only; run `env push <app>` after
+them. `copy` refuses to replace a different existing value unless you pass
+`--overwrite`, and `--rename SRC=DST` stores a key under another name. See
+[Copying keys from one app to another](docs/usage.md#copying-keys-from-one-app-to-another).
 
 ## Where state lives
 
@@ -63,7 +70,9 @@ in `vaults/<app>.enc`, and automatic pre-change backups in
 - Secret values never appear in command output (single redaction chokepoint in
   the code, regression-tested).
 - No `--set KEY=VALUE` flags (they would land in shell history); new values
-  come only via `edit`, which uses a RAM-backed temp buffer that is shredded.
+  come only via `edit` or `rotate`, which use a RAM-backed temp buffer that is
+  shredded, or via `copy`, which moves an existing value between two encrypted
+  snapshots without anyone seeing it.
 - `push` is a dry run unless you pass `--apply`; every apply backs up the
   prior remote state first, so you can always see what was there before.
 - REPLACE-not-merge: pushes always send the full var set, so the snapshot you

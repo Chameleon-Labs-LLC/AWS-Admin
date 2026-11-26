@@ -209,6 +209,39 @@ aws-admin env push cl --apply --redeploy
 aws-admin env push all --apply --redeploy
 ```
 
+## Copying keys from one app to another
+
+To give a new app the same secret another app already has (an AI provider key,
+say), copy it between the two encrypted snapshots. Nobody types, pastes or sees
+the value: it moves from one snapshot to the other in memory.
+
+```
+aws-admin env pull cl                   # source: refresh its snapshot
+aws-admin env pull st                   # destination: refresh its snapshot
+aws-admin env copy ANTHROPIC_API_KEY OPENAI_API_KEY --from cl --to st
+aws-admin env push st                   # dry run: key-only diff
+aws-admin env push st --apply --redeploy
+```
+
+- `copy` never calls AWS. It changes only the destination's local snapshot, so
+  pull both apps first; if either has no snapshot, it stops and names it.
+- Every key must be in the source snapshot, or nothing is copied and the
+  missing keys are named. A key set to different values at app- and
+  branch-level in the source is refused too (fix that with `env edit` first);
+  otherwise the branch-level value wins, as it does in Amplify.
+- A key the destination doesn't have is added at app-level. A key it already
+  has with the **same** value is reported as unchanged.
+- A key the destination already has with a **different** value is never
+  replaced silently: the copy is refused, nothing is written, and the keys are
+  named. Re-run with `--overwrite` to replace them (at every level where the
+  key lives in the destination).
+- `--rename SRC=DST` stores a key under another name in the destination, e.g.
+  `--rename OPENAI_API_KEY=AI_OPENAI_KEY`. Repeat it for several keys.
+- `--from` and `--to` must be different apps; `all` is not accepted.
+- The destination snapshot is backed up first, under
+  `~/.config/aws-admin/backups/`. The source snapshot is never modified.
+- Output is key/app names only: never a value, its length, or a hash of it.
+
 ## Branch-level overrides
 
 Amplify lets you set env vars at two levels: app-wide, and per-branch

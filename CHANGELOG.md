@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-26
+
+- `env copy KEY [KEY...] --from <app> --to <app>`: copies env-var values from one app's encrypted local snapshot to another's, unseen. Output is key and app names only: never a value, its length, or a hash.
+  - It refuses, and writes nothing, when the two apps are the same, either snapshot is missing, a key is missing or blank in the source, or a source key has different app-level and branch-level values.
+  - A destination key that already holds a different value is replaced only with `--overwrite`. Keys with the same value are reported as unchanged.
+  - `--rename SRC=DST` stores a key under another name. The destination snapshot is backed up before the write.
+- New `/aws-env-copy` slash command.
+- `pull`, `edit`, `rotate` and `copy` now lock the app's snapshot. A second command on the same app is refused instead of overwriting the first.
+- Snapshots are written atomically (a temp file renamed into place).
+
 ## [0.11.5] - 2026-11-09
 
 ### Added
