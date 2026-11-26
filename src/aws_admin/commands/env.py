@@ -30,6 +30,11 @@ def _fetch_remote(client, app_id: str, branch: str) -> tuple[dict, dict]:
 
 def pull(app_token: str, client=None) -> str:
     ref = config.resolve_app(app_token)
+    with vault.snapshot_lock(ref.name):
+        return _pull_locked(ref, client)
+
+
+def _pull_locked(ref, client) -> str:
     client = _client(client)
     app_env, branch_env = _fetch_remote(client, ref.app_id, config.DEFAULT_BRANCH)
 
@@ -155,6 +160,13 @@ def _format_rotate_summary(name, rotated, added, skipped, unchanged) -> str:
 
 
 def rotate(name: str, app_tokens: list[str], *, confirm=None, open_editor=None) -> str:
+    """Locked entry point; see _rotate_locked."""
+    names = [ref.name for ref in config.resolve_apps(app_tokens)]
+    with vault.snapshot_lock(*names):
+        return _rotate_locked(name, app_tokens, confirm=confirm, open_editor=open_editor)
+
+
+def _rotate_locked(name: str, app_tokens: list[str], *, confirm=None, open_editor=None) -> str:
     """Set `name` to a new value across the given apps' LOCAL snapshots. No AWS.
 
     Enter the value once in the editor; it is written to every level (app and/or
@@ -344,6 +356,13 @@ def copy(keys: list[str], from_token: str, to_token: str, *,
         raise ValueError("Name at least one key to copy.")
     mapping = _parse_renames(keys, list(renames or []))
 
+    # The destination is read, checked and written under its lock, so two
+    # copies (or a copy and an edit) can't both pass the overwrite check.
+    with vault.snapshot_lock(dst_ref.name):
+        return _copy_locked(keys, src_ref, dst_ref, mapping, overwrite)
+
+
+def _copy_locked(keys, src_ref, dst_ref, mapping, overwrite) -> str:
     # Load both snapshots up front; fail fast if either app was never pulled.
     src_snap = vault.load_snapshot(src_ref.name)
     dst_snap = vault.load_snapshot(dst_ref.name)
